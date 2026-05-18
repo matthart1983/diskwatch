@@ -110,7 +110,7 @@ fn draw_device_table(f: &mut Frame, area: Rect, app: &App) {
     );
 
     // Rule under header
-    let rule: String = std::iter::repeat_n('\u{2500}', inner.width as usize - 2).collect();
+    let rule: String = "\u{2500}".repeat(inner.width as usize - 2);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,

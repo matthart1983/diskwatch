@@ -250,8 +250,7 @@ fn draw_ata_table(f: &mut Frame, area: Rect, tick: &SmartTick) {
         header.to_string(),
         Style::default().fg(p::DIM),
     ))];
-    let rule: String =
-        std::iter::repeat_n('\u{2500}', area.width.saturating_sub(2) as usize).collect();
+    let rule: String = "\u{2500}".repeat(area.width.saturating_sub(2) as usize);
     lines.push(Line::from(Span::styled(
         rule,
         Style::default().fg(p::FAINT),

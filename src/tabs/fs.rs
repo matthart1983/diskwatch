@@ -99,8 +99,7 @@ fn draw_mounts_table(f: &mut Frame, area: Rect, app: &App) {
         },
     );
 
-    let rule: String =
-        std::iter::repeat_n('\u{2500}', inner.width.saturating_sub(2) as usize).collect();
+    let rule: String = "\u{2500}".repeat(inner.width.saturating_sub(2) as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,

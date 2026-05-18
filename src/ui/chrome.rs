@@ -230,7 +230,7 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
         width: area.width,
         height: 1,
     };
-    let divider: String = std::iter::repeat_n('\u{2500}', area.width as usize).collect();
+    let divider: String = "\u{2500}".repeat(area.width as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             divider,

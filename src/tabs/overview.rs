@@ -526,13 +526,13 @@ fn draw_capacity_bar(f: &mut Frame, area: Rect, app: &App) {
         } else {
             p::GREEN
         };
-        let block: String = std::iter::repeat_n('\u{2588}', seg_w).collect();
+        let block: String = "\u{2588}".repeat(seg_w);
         spans.push(Span::styled(block, Style::default().fg(color).bg(p::BG)));
         consumed_cells += seg_w;
     }
     if consumed_cells < bar_w {
         let free_w = bar_w - consumed_cells;
-        let block: String = std::iter::repeat_n('\u{2591}', free_w).collect();
+        let block: String = "\u{2591}".repeat(free_w);
         spans.push(Span::styled(block, Style::default().fg(p::FAINT).bg(p::BG)));
     }
     f.render_widget(

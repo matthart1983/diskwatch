@@ -1,7 +1,8 @@
 [package]
 name = "diskwatch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+rust-version = "1.75"
 description = "Single-host, read-only disk diagnostics TUI. Eight tabs across devices, volumes, filesystems, IO, SMART, hot files, and insights. Sibling to netwatch and syswatch."
 license = "MIT"
 repository = "https://github.com/matthart1983/diskwatch"
