@@ -33,6 +33,7 @@ serde_json = "1"
 # is enabled by default in notify 6+), inotify on Linux. We use the raw
 # event stream, not the debounced API.
 notify = "7"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

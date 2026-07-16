@@ -256,7 +256,7 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
     if inner.height < 2 {
         return;
     }
-    let header = "   DEVICE     MODEL                         SIZE     USED   SMART";
+    let header = "   DEVICE     MODEL                         SIZE     USED   TEMP  SMART";
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             header.to_string(),
@@ -295,6 +295,18 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
             Some(false) => p::RED,
             None => p::DIM,
         };
+        // Temperature from the SMART collector (cached, polled per
+        // configured interval). Color-coded so a hot drive pops out
+        // without the user having to switch tabs.
+        let (temp_text, temp_col) = match app.smart.by_device.get(&d.name) {
+            Some(tick) => match tick.temperature_c {
+                Some(t) if t >= 70 => (format!("{}°C", t), p::RED),
+                Some(t) if t >= 55 => (format!("{}°C", t), p::YELLOW),
+                Some(t) => (format!("{}°C", t), p::FG),
+                None => ("—".to_string(), p::DIM),
+            },
+            None => ("—".to_string(), p::DIM),
+        };
         let line = Line::from(vec![
             Span::raw(" "),
             Span::styled("\u{25cf}", Style::default().fg(dot_col)),
@@ -309,6 +321,11 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(
                 pad_left(&format!("{}%", used_pct), 4),
                 Style::default().fg(used_col),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                pad_left(&temp_text, 6),
+                Style::default().fg(temp_col),
             ),
             Span::raw("  "),
             Span::styled(smart_text.to_string(), Style::default().fg(smart_col)),
