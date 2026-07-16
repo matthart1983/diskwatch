@@ -136,7 +136,7 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(10), Constraint::Min(3)])
         .split(split[1]);
-    draw_summary(f, body[0], tick, d);
+    draw_summary(f, body[0], tick, d, app.temp_unit);
     if !tick.ata_attrs.is_empty() {
         draw_ata_table(f, body[1], tick);
     }
@@ -193,10 +193,10 @@ fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {
     );
 }
 
-fn draw_summary(f: &mut Frame, area: Rect, tick: &SmartTick, d: &DeviceTick) {
+fn draw_summary(f: &mut Frame, area: Rect, tick: &SmartTick, d: &DeviceTick, unit: crate::app::TempUnit) {
     let temp = tick
         .temperature_c
-        .map(|t| format!("{}°C", t))
+        .map(|t| unit.format_temp(t))
         .unwrap_or_else(|| "—".to_string());
     let temp_color = match tick.temperature_c {
         Some(t) if t >= 70 => p::RED,
