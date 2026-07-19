@@ -185,15 +185,14 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
         Style::default().fg(p::DIM),
     ));
 
+    // Only bindings that are actually handled in `handle_key` are shown —
+    // diskwatch has no Snapshot/Diff/Profile/Rec/Filter features (those were
+    // inherited from the netwatch footer), and advertising them was issue #6
+    // ("dead shortcuts"). The SMART refresh/interval keys are appended via
+    // `extra`.
     let groups: &[&[(char, &str)]] = &[
         &[('p', "Pause"), (',', "Settings")],
-        &[
-            ('S', "Snapshot"),
-            ('D', "Diff"),
-            ('P', "Profile"),
-            ('R', "Rec"),
-        ],
-        &[('/', "Filter"), ('q', "Quit"), ('1', "Tab")],
+        &[('q', "Quit"), ('1', "Tab")],
         &[('?', "Help")],
     ];
     for (gi, g) in groups.iter().enumerate() {

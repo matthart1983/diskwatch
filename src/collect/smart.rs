@@ -172,10 +172,12 @@ fn query_device(name: &str) -> Option<SmartTick> {
 
     // NVMe path.
     if let Some(log) = v.get("nvme_smart_health_information_log") {
-        tick.temperature_c = log
-            .get("temperature")
-            .and_then(|x| x.as_i64())
-            .map(|n| n as i16);
+        // Only override the top-level temperature parsed above when the
+        // NVMe log actually carries the field, so a log missing it can't
+        // clobber a good value with None.
+        if let Some(t) = log.get("temperature").and_then(|x| x.as_i64()) {
+            tick.temperature_c = Some(t as i16);
+        }
         tick.power_on_hours = log.get("power_on_hours").and_then(|x| x.as_u64());
         tick.power_cycles = log.get("power_cycles").and_then(|x| x.as_u64());
         tick.percentage_used = log
@@ -235,24 +237,19 @@ fn query_device(name: &str) -> Option<SmartTick> {
                 .get("raw")
                 .and_then(|x| x.get("value"))
                 .and_then(|x| x.as_u64());
+            // Reallocated_Sector_Ct (0x05) is deliberately NOT lifted into
+            // `percentage_used`: that field is the NVMe write-endurance
+            // gauge (consumed by the `nvme_wear_high` insight at >=80%), and
+            // a reallocated-sector *count* is an unrelated metric. Mapping
+            // any non-zero count to 100% falsely flagged healthy ATA/SATA
+            // drives — including spinning HDDs — as "worn out". The raw
+            // count still appears in the attribute table below.
             match id as u8 {
                 0x09 if tick.power_on_hours.is_none() => {
                     tick.power_on_hours = raw_int;
                 }
                 0x0C if tick.power_cycles.is_none() => {
                     tick.power_cycles = raw_int;
-                }
-                0x05 => {
-                    // Reallocated_Sector_Ct — surface as a "wear"
-                    // proxy (any non-zero count is a bad sign; the
-                    // SMART tab's existing table renders the raw value
-                    // separately). We don't override NVMe's
-                    // percentage_used.
-                    tick.percentage_used = if let Some(v) = raw_int {
-                        if v == 0 { tick.percentage_used } else { Some(100) }
-                    } else {
-                        tick.percentage_used
-                    };
                 }
                 _ => {}
             }
