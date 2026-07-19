@@ -251,7 +251,8 @@ fn linux_used_by_device() -> HashMap<String, u64> {
             *entry = used;
         }
     }
-    attribute_sources(&by_source, &sysfs_slaves)
+    let bmap = bcachefs_member_map();
+    attribute_sources(&by_source, &sysfs_slaves, &|m: &str| bmap.get(m).cloned())
 }
 
 /// Attribute per-mount-source used bytes to whole-disk device names.
@@ -269,28 +270,71 @@ fn linux_used_by_device() -> HashMap<String, u64> {
 ///
 /// `slaves` resolves a stacked block device path to its member disk names
 /// (`/dev/md0` → `["sda", "sdb"]`), returning `None` for plain devices.
+///
+/// `bcachefs_members` maps any bcachefs member (short name) to the full,
+/// sorted member set of the filesystem it belongs to (from `/sys/fs/bcachefs`),
+/// or `None` for non-bcachefs devices. This is what makes multi-device
+/// attribution survive a reboot (issue #5): after a remount the mount source
+/// often shows just a *single* member device instead of the colon-joined
+/// list, so trusting the source string alone dumps the whole filesystem onto
+/// one disk (>100% used). Expanding any member back to the full set restores
+/// the even split regardless of how the filesystem was mounted.
+///
+/// Usage is grouped by resolved member set before splitting: a multi-device
+/// filesystem mounted several times (subvolumes, snapshots, bind mounts)
+/// reports the same filesystem-wide statfs usage under different sources, so
+/// those are counted once (max), while distinct partitions on a single disk
+/// remain independent filesystems and sum.
 // Only called from Linux collection, but compiled everywhere so the
 // pure-logic tests run on any development machine.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn attribute_sources(
     by_source: &HashMap<String, u64>,
     slaves: &dyn Fn(&str) -> Option<Vec<String>>,
+    bcachefs_members: &dyn Fn(&str) -> Option<Vec<String>>,
 ) -> HashMap<String, u64> {
-    let mut out: HashMap<String, u64> = HashMap::new();
+    use std::collections::BTreeSet;
+
+    // Collapse sources to their resolved member set, deduping repeated
+    // mounts of the same multi-device filesystem.
+    let mut by_members: HashMap<Vec<String>, u64> = HashMap::new();
     for (source, used) in by_source {
-        let mut members: Vec<String> = source
-            .split(':')
-            .filter(|piece| piece.starts_with("/dev/"))
-            .flat_map(|piece| match slaves(piece) {
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        for piece in source.split(':').filter(|p| p.starts_with("/dev/")) {
+            let base = match slaves(piece) {
                 Some(m) if !m.is_empty() => m,
                 _ => vec![short_name(piece)],
-            })
-            .collect();
-        members.sort();
-        members.dedup();
-        if members.is_empty() {
+            };
+            for m in base {
+                // A bcachefs member stands in for its whole filesystem.
+                match bcachefs_members(&m) {
+                    Some(full) if !full.is_empty() => set.extend(full),
+                    _ => {
+                        set.insert(m);
+                    }
+                }
+            }
+        }
+        if set.is_empty() {
             continue;
         }
+        let members: Vec<String> = set.into_iter().collect();
+        let entry = by_members.entry(members.clone()).or_insert(0);
+        if members.len() > 1 {
+            // Multi-device filesystem: repeated mounts report the same
+            // filesystem-wide usage — take the max, don't sum per mount.
+            if used > entry {
+                *entry = *used;
+            }
+        } else {
+            // Single disk: distinct partitions are independent filesystems
+            // whose usage sums onto the shared parent device.
+            *entry = entry.saturating_add(*used);
+        }
+    }
+
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for (members, used) in by_members {
         let share = used / members.len() as u64;
         for m in members {
             let entry = out.entry(m).or_insert(0);
@@ -337,6 +381,58 @@ fn sysfs_slaves(dev_path: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     expand(&kernel_name, 4, &mut out);
     Some(out)
+}
+
+/// Map every bcachefs member device (short name) to the full, sorted set of
+/// member devices of the filesystem it belongs to, read from the authoritative
+/// `/sys/fs/bcachefs/<uuid>/dev-*/block` symlinks.
+///
+/// This is the source of truth for multi-device attribution (issue #5): it is
+/// independent of however the filesystem happens to be mounted, so it works
+/// even when a post-reboot remount presents a single member as the mount
+/// source instead of the colon-joined device list. Single-device bcachefs
+/// filesystems are skipped (nothing to expand). Returns an empty map when
+/// bcachefs isn't in use or the sysfs interface is absent, in which case
+/// attribution falls back to the mount-source string unchanged.
+#[cfg(target_os = "linux")]
+fn bcachefs_member_map() -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let Ok(fs_dirs) = std::fs::read_dir("/sys/fs/bcachefs") else {
+        return map;
+    };
+    for fs in fs_dirs.flatten() {
+        let fs_path = fs.path();
+        if !fs_path.is_dir() {
+            continue;
+        }
+        let mut members: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&fs_path) {
+            for e in entries.flatten() {
+                let fname = e.file_name();
+                let fname = fname.to_string_lossy();
+                if !fname.starts_with("dev-") {
+                    continue;
+                }
+                // dev-N/block → symlink to the member's block device sysfs
+                // node (…/block/sda); its file name is the kernel device.
+                if let Ok(target) = std::fs::read_link(e.path().join("block")) {
+                    if let Some(dev) = target.file_name() {
+                        members.push(short_name(&dev.to_string_lossy()));
+                    }
+                }
+            }
+        }
+        members.sort();
+        members.dedup();
+        // Single-device (or unreadable) filesystems need no expansion.
+        if members.len() < 2 {
+            continue;
+        }
+        for m in &members {
+            map.insert(m.clone(), members.clone());
+        }
+    }
+    map
 }
 
 /// Returns (physical-or-container-disk, used_bytes) per sysinfo mount,
@@ -467,6 +563,20 @@ mod tests {
         None
     }
 
+    fn no_bcachefs(_: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Build a bcachefs member-map lookup: any listed member resolves to the
+    /// full set. Mirrors what `bcachefs_member_map` reads from sysfs.
+    fn bcachefs(members: &'static [&'static str]) -> impl Fn(&str) -> Option<Vec<String>> {
+        move |m: &str| {
+            members
+                .contains(&m)
+                .then(|| members.iter().map(|s| s.to_string()).collect())
+        }
+    }
+
     fn sources(list: &[(&str, u64)]) -> HashMap<String, u64> {
         list.iter().map(|(s, u)| (s.to_string(), *u)).collect()
     }
@@ -474,7 +584,7 @@ mod tests {
     #[test]
     fn plain_partition_attributes_to_parent_disk() {
         let by_source = sources(&[("/dev/mmcblk0p2", 27_000), ("/dev/mmcblk0p1", 300)]);
-        let out = attribute_sources(&by_source, &no_slaves);
+        let out = attribute_sources(&by_source, &no_slaves, &no_bcachefs);
         assert_eq!(out.get("mmcblk0"), Some(&27_300));
     }
 
@@ -488,7 +598,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(":");
         let by_source = sources(&[(members.as_str(), 640_000_000)]);
-        let out = attribute_sources(&by_source, &no_slaves);
+        let out = attribute_sources(&by_source, &no_slaves, &no_bcachefs);
         assert_eq!(out.get("sda"), Some(&80_000_000));
         assert_eq!(out.get("sdh"), Some(&80_000_000));
         assert_eq!(out.len(), 8);
@@ -503,7 +613,7 @@ mod tests {
                 .then(|| vec!["sdd".into(), "sdb".into(), "sde".into(), "sdc".into()])
         };
         let by_source = sources(&[("/dev/md0", 4_000_000), ("/dev/nvme0n1p1", 5_000)]);
-        let out = attribute_sources(&by_source, &slaves);
+        let out = attribute_sources(&by_source, &slaves, &no_bcachefs);
         assert_eq!(out.get("sdd"), Some(&1_000_000));
         assert_eq!(out.get("sdc"), Some(&1_000_000));
         assert_eq!(out.get("nvme0n1"), Some(&5_000));
@@ -517,15 +627,57 @@ mod tests {
             ("tmpfs", 1_000),
             ("pool/dataset", 9_000),
         ]);
-        let out = attribute_sources(&by_source, &no_slaves);
+        let out = attribute_sources(&by_source, &no_slaves, &no_bcachefs);
         assert!(out.is_empty());
     }
 
     #[test]
     fn same_disk_partitions_sum() {
         let by_source = sources(&[("/dev/sda1", 100), ("/dev/sda2", 250)]);
-        let out = attribute_sources(&by_source, &no_slaves);
+        let out = attribute_sources(&by_source, &no_slaves, &no_bcachefs);
         assert_eq!(out.get("sda"), Some(&350));
+    }
+
+    #[test]
+    fn bcachefs_single_device_mount_expands_to_all_members() {
+        // Issue #5: after a reboot the fs remounts showing a single member
+        // as the source instead of the colon-joined list, so v0.1.2 dumped
+        // the whole filesystem onto one disk (>100% used). The sysfs member
+        // map expands the lone member back to the full set so usage still
+        // splits evenly across all four disks.
+        let members: &[&str] = &["sda", "sdb", "sdc", "sdd"];
+        let by_source = sources(&[("/dev/sda", 4_000_000)]);
+        let out = attribute_sources(&by_source, &no_slaves, &bcachefs(members));
+        assert_eq!(out.get("sda"), Some(&1_000_000));
+        assert_eq!(out.get("sdd"), Some(&1_000_000));
+        assert_eq!(out.len(), 4);
+    }
+
+    #[test]
+    fn bcachefs_colon_source_still_splits_with_member_map() {
+        // The historical colon-joined form keeps working, and the member
+        // map is idempotent — union of the same set is the same set.
+        let members: &[&str] = &["sda", "sdb"];
+        let by_source = sources(&[("/dev/sda:/dev/sdb", 2_000_000)]);
+        let out = attribute_sources(&by_source, &no_slaves, &bcachefs(members));
+        assert_eq!(out.get("sda"), Some(&1_000_000));
+        assert_eq!(out.get("sdb"), Some(&1_000_000));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn bcachefs_subvolume_double_mount_not_double_counted() {
+        // The same multi-device fs mounted twice (root + a subvolume, or a
+        // colon-list mount plus a single-member remount) reports the same
+        // fs-wide statfs usage under different sources. It must be counted
+        // once, not summed — otherwise each disk reads 2× and can exceed
+        // 100%.
+        let members: &[&str] = &["sda", "sdb"];
+        let by_source = sources(&[("/dev/sda:/dev/sdb", 2_000_000), ("/dev/sda", 2_000_000)]);
+        let out = attribute_sources(&by_source, &no_slaves, &bcachefs(members));
+        assert_eq!(out.get("sda"), Some(&1_000_000));
+        assert_eq!(out.get("sdb"), Some(&1_000_000));
+        assert_eq!(out.len(), 2);
     }
 }
 
