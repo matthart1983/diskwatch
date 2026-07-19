@@ -173,15 +173,26 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
 pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::raw(" "));
+
+    // Arrow-key navigation hint — always shown so users discover the
+    // per-tab picker (Devices, SMART, FS, Overview) on first launch.
+    spans.push(Span::styled(
+        "\u{2191}\u{2193}\u{2190}\u{2192}".to_string(),
+        Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        ":Nav ",
+        Style::default().fg(p::DIM),
+    ));
+
+    // Only bindings that are actually handled in `handle_key` are shown —
+    // diskwatch has no Snapshot/Diff/Profile/Rec/Filter features (those were
+    // inherited from the netwatch footer), and advertising them was issue #6
+    // ("dead shortcuts"). The SMART refresh/interval keys are appended via
+    // `extra`.
     let groups: &[&[(char, &str)]] = &[
         &[('p', "Pause"), (',', "Settings")],
-        &[
-            ('S', "Snapshot"),
-            ('D', "Diff"),
-            ('P', "Profile"),
-            ('R', "Rec"),
-        ],
-        &[('/', "Filter"), ('q', "Quit"), ('1', "Tab")],
+        &[('q', "Quit"), ('1', "Tab")],
         &[('?', "Help")],
     ];
     for (gi, g) in groups.iter().enumerate() {

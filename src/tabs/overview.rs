@@ -243,6 +243,53 @@ fn draw_middle(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::VisibleColumns;
+    let cols = app.visible_columns;
+    let show_size = cols.contains(VisibleColumns::SIZE);
+    let show_free = cols.contains(VisibleColumns::FREE);
+    let show_used = cols.contains(VisibleColumns::USED_PCT);
+    let show_temp = cols.contains(VisibleColumns::TEMP);
+    let show_smart = cols.contains(VisibleColumns::SMART);
+
+    // Header line — built so we only mention columns the user has on.
+    // Pinned prefix (dot + DEVICE + MODEL) is always shown.
+    let mut header_spans: Vec<Span> = vec![
+        Span::raw("   "),
+        Span::styled(pad_right("DEVICE", 11), Style::default().fg(p::DIM)),
+        Span::styled(pad_right("MODEL", 30), Style::default().fg(p::DIM)),
+    ];
+    if show_size {
+        header_spans.push(Span::styled(
+            pad_left("SIZE", 8),
+            Style::default().fg(p::DIM),
+        ));
+        header_spans.push(Span::raw("  "));
+    }
+    if show_free {
+        header_spans.push(Span::styled(
+            pad_left("FREE", 8),
+            Style::default().fg(p::DIM),
+        ));
+        header_spans.push(Span::raw("  "));
+    }
+    if show_used {
+        header_spans.push(Span::styled(
+            pad_left("USED", 4),
+            Style::default().fg(p::DIM),
+        ));
+        header_spans.push(Span::raw("  "));
+    }
+    if show_temp {
+        header_spans.push(Span::styled(
+            pad_left("TEMP", 6),
+            Style::default().fg(p::DIM),
+        ));
+        header_spans.push(Span::raw("  "));
+    }
+    if show_smart {
+        header_spans.push(Span::styled("SMART", Style::default().fg(p::DIM)));
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::FAINT).bg(p::BG))
@@ -256,13 +303,9 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
     if inner.height < 2 {
         return;
     }
-    let header = "   DEVICE     MODEL                         SIZE     USED   SMART";
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            header.to_string(),
-            Style::default().fg(p::DIM),
-        )))
-        .style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(header_spans))
+            .style(Style::default().bg(p::BG)),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -285,6 +328,7 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
         } else {
             p::FG
         };
+        let free_bytes = d.size_bytes.saturating_sub(d.used_bytes);
         let (smart_text, smart_col) = match d.smart_ok {
             Some(true) => ("ok", p::GREEN),
             Some(false) => ("FAIL", p::RED),
@@ -295,26 +339,60 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
             Some(false) => p::RED,
             None => p::DIM,
         };
-        let line = Line::from(vec![
+        // Temperature from the SMART collector (cached, polled per
+        // configured interval). Color-coded so a hot drive pops out
+        // without the user having to switch tabs. Convert to the
+        // display unit configured in app.temp_unit.
+        let (temp_text, temp_col) = match app.smart.by_device.get(&d.name) {
+            Some(tick) => match tick.temperature_c {
+                Some(t) if t >= 70 => (app.temp_unit.format_temp(t), p::RED),
+                Some(t) if t >= 55 => (app.temp_unit.format_temp(t), p::YELLOW),
+                Some(t) => (app.temp_unit.format_temp(t), p::FG),
+                None => ("—".to_string(), p::DIM),
+            },
+            None => ("—".to_string(), p::DIM),
+        };
+        let mut line_spans: Vec<Span> = vec![
             Span::raw(" "),
             Span::styled("\u{25cf}", Style::default().fg(dot_col)),
             Span::raw(" "),
             Span::styled(pad_right(&d.name, 11), Style::default().fg(p::FG)),
             Span::styled(pad_right(&d.model, 30), Style::default().fg(p::FG)),
-            Span::styled(
+        ];
+        if show_size {
+            line_spans.push(Span::styled(
                 pad_left(&fmt_size(d.size_bytes), 8),
                 Style::default().fg(p::DIM),
-            ),
-            Span::raw("  "),
-            Span::styled(
+            ));
+            line_spans.push(Span::raw("  "));
+        }
+        if show_free {
+            line_spans.push(Span::styled(
+                pad_left(&fmt_size(free_bytes), 8),
+                Style::default().fg(p::CYAN),
+            ));
+            line_spans.push(Span::raw("  "));
+        }
+        if show_used {
+            line_spans.push(Span::styled(
                 pad_left(&format!("{}%", used_pct), 4),
                 Style::default().fg(used_col),
-            ),
-            Span::raw("  "),
-            Span::styled(smart_text.to_string(), Style::default().fg(smart_col)),
-        ]);
+            ));
+            line_spans.push(Span::raw("  "));
+        }
+        if show_temp {
+            line_spans.push(Span::styled(
+                pad_left(&temp_text, 6),
+                Style::default().fg(temp_col),
+            ));
+            line_spans.push(Span::raw("  "));
+        }
+        if show_smart {
+            line_spans.push(Span::styled(smart_text.to_string(), Style::default().fg(smart_col)));
+        }
         f.render_widget(
-            Paragraph::new(line).style(Style::default().bg(p::BG)),
+            Paragraph::new(Line::from(line_spans))
+                .style(Style::default().bg(p::BG)),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 1 + i as u16,

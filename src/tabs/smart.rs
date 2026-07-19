@@ -89,32 +89,56 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Split: top row = root/sudo banner; rest = SMART content.
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .split(inner);
+    draw_root_banner(f, split[0]);
+
     let tick = app.smart.by_device.get(&d.name);
 
     if !app.smart.smartctl_available() {
-        draw_missing_smartctl_banner(f, inner, d);
+        draw_missing_smartctl_banner(f, split[1], d);
         return;
     }
 
     let Some(tick) = tick else {
+        let secs = app.smart.secs_until_next_refresh();
+        let countdown = if app.smart.smartctl_available() {
+            format!(
+                "  waiting for first SMART poll… next in ~{}s  (press r to refresh now)",
+                secs
+            )
+        } else {
+            "  waiting for smartctl probe…".to_string()
+        };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    "  waiting for first SMART poll (runs every 5 min)…",
+                    countdown,
                     Style::default().fg(p::DIM),
                 )),
             ])
             .style(Style::default().bg(p::BG)),
-            inner,
+            split[1],
         );
         return;
     };
 
-    if tick.ata_attrs.is_empty() {
-        draw_nvme_summary(f, inner, tick, d);
-    } else {
-        draw_ata_table(f, inner, tick);
+    // Layout the SMART body: top half always shows the headline summary
+    // (temp / hours / cycles / wear — what the Overview page's TEMP
+    // column also shows). Bottom half shows the per-protocol detail:
+    // NVMe gets nothing extra (the summary already lists every NVMe
+    // metric); ATA gets the full attribute table.
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(10), Constraint::Min(3)])
+        .split(split[1]);
+    draw_summary(f, body[0], tick, d, app.temp_unit);
+    if !tick.ata_attrs.is_empty() {
+        draw_ata_table(f, body[1], tick);
     }
 }
 
@@ -169,10 +193,10 @@ fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {
     );
 }
 
-fn draw_nvme_summary(f: &mut Frame, area: Rect, tick: &SmartTick, d: &DeviceTick) {
+fn draw_summary(f: &mut Frame, area: Rect, tick: &SmartTick, d: &DeviceTick, unit: crate::app::TempUnit) {
     let temp = tick
         .temperature_c
-        .map(|t| format!("{}°C", t))
+        .map(|t| unit.format_temp(t))
         .unwrap_or_else(|| "—".to_string());
     let temp_color = match tick.temperature_c {
         Some(t) if t >= 70 => p::RED,
@@ -304,4 +328,54 @@ fn kv(key: &str, val: &str, val_color: ratatui::style::Color) -> Line<'static> {
         Span::styled(format!(" {:<16}", key), Style::default().fg(p::DIM)),
         Span::styled(val.to_string(), Style::default().fg(val_color)),
     ])
+}
+
+/// One-line banner at the top of the SMART panel. Tells the user whether
+/// they have full SMART access (root via sudo) or whether they need to
+/// relaunch with sudo to see temperature / wear / power-on hours.
+fn draw_root_banner(f: &mut Frame, area: Rect) {
+    if area.height < 1 || area.width < 10 {
+        return;
+    }
+    let line = if running_as_root() {
+        Line::from(vec![
+            Span::styled(" ✓ running as root — ", Style::default().fg(p::GREEN)),
+            Span::styled(
+                "full SMART data available",
+                Style::default().fg(p::DIM),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" ⚠ ", Style::default().fg(p::YELLOW)),
+            Span::styled(
+                "for SMART statistics (temperature, wear, hours), launch with: ",
+                Style::default().fg(p::DIM),
+            ),
+            Span::styled(
+                "sudo diskwatch",
+                Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    // SAFETY: libc::geteuid is async-signal-safe and has no preconditions.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn running_as_root() -> bool {
+    false
 }
