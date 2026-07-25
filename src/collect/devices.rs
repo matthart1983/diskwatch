@@ -280,11 +280,15 @@ fn linux_used_by_device() -> HashMap<String, u64> {
 /// one disk (>100% used). Expanding any member back to the full set restores
 /// the even split regardless of how the filesystem was mounted.
 ///
-/// Usage is grouped by resolved member set before splitting: a multi-device
-/// filesystem mounted several times (subvolumes, snapshots, bind mounts)
-/// reports the same filesystem-wide statfs usage under different sources, so
-/// those are counted once (max), while distinct partitions on a single disk
-/// remain independent filesystems and sum.
+/// Sources that resolve *through the bcachefs member map* are grouped by that
+/// member set before splitting and counted once (max): one bcachefs filesystem
+/// mounted several times (subvolumes, snapshots) reports the same
+/// filesystem-wide statfs usage under different source strings, so summing
+/// those would multiply it. Every other source sums, because a shared member
+/// set does **not** imply a shared filesystem: two LVs on one multi-PV VG both
+/// resolve to the same PVs via `slaves` yet are independent filesystems whose
+/// usage must add up. (Collapsing those was a v0.1.3 regression — it silently
+/// dropped all but the largest LV.)
 // Only called from Linux collection, but compiled everywhere so the
 // pure-logic tests run on any development machine.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -295,11 +299,23 @@ fn attribute_sources(
 ) -> HashMap<String, u64> {
     use std::collections::BTreeSet;
 
-    // Collapse sources to their resolved member set, deduping repeated
-    // mounts of the same multi-device filesystem.
-    let mut by_members: HashMap<Vec<String>, u64> = HashMap::new();
+    fn spread(out: &mut HashMap<String, u64>, members: &[String], used: u64) {
+        let share = used / members.len() as u64;
+        for m in members {
+            let entry = out.entry(m.clone()).or_insert(0);
+            *entry = entry.saturating_add(share);
+        }
+    }
+
+    let mut out: HashMap<String, u64> = HashMap::new();
+    // One entry per bcachefs filesystem, keyed by its sysfs member set —
+    // the only grouping where different source strings are provably the
+    // same filesystem.
+    let mut bcachefs_fs: HashMap<Vec<String>, u64> = HashMap::new();
+
     for (source, used) in by_source {
         let mut set: BTreeSet<String> = BTreeSet::new();
+        let mut via_bcachefs = false;
         for piece in source.split(':').filter(|p| p.starts_with("/dev/")) {
             let base = match slaves(piece) {
                 Some(m) if !m.is_empty() => m,
@@ -308,7 +324,10 @@ fn attribute_sources(
             for m in base {
                 // A bcachefs member stands in for its whole filesystem.
                 match bcachefs_members(&m) {
-                    Some(full) if !full.is_empty() => set.extend(full),
+                    Some(full) if !full.is_empty() => {
+                        via_bcachefs = true;
+                        set.extend(full);
+                    }
                     _ => {
                         set.insert(m);
                     }
@@ -319,27 +338,21 @@ fn attribute_sources(
             continue;
         }
         let members: Vec<String> = set.into_iter().collect();
-        let entry = by_members.entry(members.clone()).or_insert(0);
-        if members.len() > 1 {
-            // Multi-device filesystem: repeated mounts report the same
-            // filesystem-wide usage — take the max, don't sum per mount.
-            if used > entry {
+        if via_bcachefs {
+            // Same filesystem under any of its members: count it once.
+            let entry = bcachefs_fs.entry(members).or_insert(0);
+            if *used > *entry {
                 *entry = *used;
             }
         } else {
-            // Single disk: distinct partitions are independent filesystems
-            // whose usage sums onto the shared parent device.
-            *entry = entry.saturating_add(*used);
+            // Independent filesystem — sums, even if it shares members
+            // with another (partitions on a disk, LVs on a VG).
+            spread(&mut out, &members, *used);
         }
     }
 
-    let mut out: HashMap<String, u64> = HashMap::new();
-    for (members, used) in by_members {
-        let share = used / members.len() as u64;
-        for m in members {
-            let entry = out.entry(m).or_insert(0);
-            *entry = entry.saturating_add(share);
-        }
+    for (members, used) in bcachefs_fs {
+        spread(&mut out, &members, used);
     }
     out
 }
@@ -678,6 +691,39 @@ mod tests {
         assert_eq!(out.get("sda"), Some(&1_000_000));
         assert_eq!(out.get("sdb"), Some(&1_000_000));
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn independent_filesystems_on_shared_members_sum() {
+        // Two LVs on one VG spanning two PVs: `slaves` resolves both to the
+        // same member set, but they are independent filesystems. v0.1.3
+        // grouped by member set and took the max, silently dropping the
+        // smaller LV — 1.5 TB of usage reported as 1.0 TB.
+        let slaves = |dev: &str| -> Option<Vec<String>> {
+            dev.starts_with("/dev/mapper/vg-")
+                .then(|| vec!["sda".into(), "sdb".into()])
+        };
+        let by_source = sources(&[
+            ("/dev/mapper/vg-lv1", 1_000_000),
+            ("/dev/mapper/vg-lv2", 500_000),
+        ]);
+        let out = attribute_sources(&by_source, &slaves, &no_bcachefs);
+        assert_eq!(out.get("sda"), Some(&750_000));
+        assert_eq!(out.get("sdb"), Some(&750_000));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn bcachefs_and_an_unrelated_fs_on_one_member_both_land() {
+        // A disk that is both a bcachefs member and hosts a separate
+        // partition: the bcachefs share and the partition's own usage add
+        // up on that disk rather than one displacing the other.
+        let members: &[&str] = &["sda", "sdb"];
+        let by_source = sources(&[("/dev/sda:/dev/sdb", 2_000_000), ("/dev/sdc1", 400)]);
+        let out = attribute_sources(&by_source, &no_slaves, &bcachefs(members));
+        assert_eq!(out.get("sda"), Some(&1_000_000));
+        assert_eq!(out.get("sdc"), Some(&400));
+        assert_eq!(out.len(), 3);
     }
 }
 
