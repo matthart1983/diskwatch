@@ -159,7 +159,11 @@ fn query_device(name: &str) -> Option<SmartTick> {
     // (under nvme_smart_health_information_log) and ATA (as
     // `.temperature.current`). This is the value the SMART tab's
     // headline row and the Overview page's TEMP column render.
-    if let Some(t) = v.get("temperature").and_then(|x| x.get("current")).and_then(|x| x.as_i64()) {
+    if let Some(t) = v
+        .get("temperature")
+        .and_then(|x| x.get("current"))
+        .and_then(|x| x.as_i64())
+    {
         tick.temperature_c = Some(t as i16);
     }
     if let Some(t) = v.get("temperature").and_then(|x| x.as_i64()) {

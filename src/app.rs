@@ -357,8 +357,7 @@ fn handle_key(app: &mut App, key: KeyCode) {
         // `0` resets to the upstream-conservative default.
         KeyCode::Char('0') => {
             app.smart_interval_secs = DEFAULT_SMART_INTERVAL_SECS;
-            app.smart_interval_label =
-                format_smart_label(DEFAULT_SMART_INTERVAL_SECS);
+            app.smart_interval_label = format_smart_label(DEFAULT_SMART_INTERVAL_SECS);
             app.smart
                 .set_interval(Duration::from_secs(DEFAULT_SMART_INTERVAL_SECS));
             app.smart_refresh_requested = true;
@@ -658,7 +657,10 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume live updates")]),
         Line::from(vec![key("?"), desc("toggle this help")]),
-        Line::from(vec![key(","), desc("settings — toggle columns / units / interval")]),
+        Line::from(vec![
+            key(","),
+            desc("settings — toggle columns / units / interval"),
+        ]),
         Line::from(vec![key("q / Esc"), desc("quit")]),
         Line::from(""),
         Line::from(Span::styled(
@@ -713,23 +715,48 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let rows: Vec<(&str, String)> = vec![
         (
             "Overview  DEVICES — SIZE column",
-            (if app.visible_columns.contains(VisibleColumns::SIZE) { on } else { off }).to_string(),
+            (if app.visible_columns.contains(VisibleColumns::SIZE) {
+                on
+            } else {
+                off
+            })
+            .to_string(),
         ),
         (
             "Overview  DEVICES — FREE column",
-            (if app.visible_columns.contains(VisibleColumns::FREE) { on } else { off }).to_string(),
+            (if app.visible_columns.contains(VisibleColumns::FREE) {
+                on
+            } else {
+                off
+            })
+            .to_string(),
         ),
         (
             "Overview  DEVICES — USED % column",
-            (if app.visible_columns.contains(VisibleColumns::USED_PCT) { on } else { off }).to_string(),
+            (if app.visible_columns.contains(VisibleColumns::USED_PCT) {
+                on
+            } else {
+                off
+            })
+            .to_string(),
         ),
         (
             "Overview  DEVICES — TEMP column",
-            (if app.visible_columns.contains(VisibleColumns::TEMP) { on } else { off }).to_string(),
+            (if app.visible_columns.contains(VisibleColumns::TEMP) {
+                on
+            } else {
+                off
+            })
+            .to_string(),
         ),
         (
             "Overview  DEVICES — SMART column",
-            (if app.visible_columns.contains(VisibleColumns::SMART) { on } else { off }).to_string(),
+            (if app.visible_columns.contains(VisibleColumns::SMART) {
+                on
+            } else {
+                off
+            })
+            .to_string(),
         ),
         ("Temperature unit", app.temp_unit.label().to_string()),
         (
@@ -745,7 +772,11 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     )));
     lines.push(Line::from(""));
     for (i, (label, value)) in rows.iter().enumerate() {
-        let marker = if i == app.settings_cursor { " > " } else { "   " };
+        let marker = if i == app.settings_cursor {
+            " > "
+        } else {
+            "   "
+        };
         let is_cycle = i >= SETTINGS_FIRST_CYCLE;
         let label_color = if is_cycle { p::YELLOW } else { p::FG };
         let value_color = if is_cycle {
@@ -762,10 +793,7 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         };
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
-            Span::styled(
-                format!("{:<38}", label),
-                Style::default().fg(label_color),
-            ),
+            Span::styled(format!("{:<38}", label), Style::default().fg(label_color)),
             Span::styled(value.clone(), Style::default().fg(value_color)),
         ]));
     }

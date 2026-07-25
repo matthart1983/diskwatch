@@ -116,10 +116,7 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(
-                    countdown,
-                    Style::default().fg(p::DIM),
-                )),
+                Line::from(Span::styled(countdown, Style::default().fg(p::DIM))),
             ])
             .style(Style::default().bg(p::BG)),
             split[1],
@@ -193,7 +190,13 @@ fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {
     );
 }
 
-fn draw_summary(f: &mut Frame, area: Rect, tick: &SmartTick, d: &DeviceTick, unit: crate::app::TempUnit) {
+fn draw_summary(
+    f: &mut Frame,
+    area: Rect,
+    tick: &SmartTick,
+    d: &DeviceTick,
+    unit: crate::app::TempUnit,
+) {
     let temp = tick
         .temperature_c
         .map(|t| unit.format_temp(t))
@@ -340,10 +343,7 @@ fn draw_root_banner(f: &mut Frame, area: Rect) {
     let line = if running_as_root() {
         Line::from(vec![
             Span::styled(" ✓ running as root — ", Style::default().fg(p::GREEN)),
-            Span::styled(
-                "full SMART data available",
-                Style::default().fg(p::DIM),
-            ),
+            Span::styled("full SMART data available", Style::default().fg(p::DIM)),
         ])
     } else {
         Line::from(vec![

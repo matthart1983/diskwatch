@@ -304,8 +304,7 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     f.render_widget(
-        Paragraph::new(Line::from(header_spans))
-            .style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(header_spans)).style(Style::default().bg(p::BG)),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -388,11 +387,13 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
             line_spans.push(Span::raw("  "));
         }
         if show_smart {
-            line_spans.push(Span::styled(smart_text.to_string(), Style::default().fg(smart_col)));
+            line_spans.push(Span::styled(
+                smart_text.to_string(),
+                Style::default().fg(smart_col),
+            ));
         }
         f.render_widget(
-            Paragraph::new(Line::from(line_spans))
-                .style(Style::default().bg(p::BG)),
+            Paragraph::new(Line::from(line_spans)).style(Style::default().bg(p::BG)),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 1 + i as u16,

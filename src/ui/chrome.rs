@@ -180,10 +180,7 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
         "\u{2191}\u{2193}\u{2190}\u{2192}".to_string(),
         Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(
-        ":Nav ",
-        Style::default().fg(p::DIM),
-    ));
+    spans.push(Span::styled(":Nav ", Style::default().fg(p::DIM)));
 
     // Only bindings that are actually handled in `handle_key` are shown —
     // diskwatch has no Snapshot/Diff/Profile/Rec/Filter features (those were
