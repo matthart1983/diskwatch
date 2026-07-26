@@ -87,9 +87,13 @@ cargo build --release
 | `?` | Help |
 | `q` / `Esc` | Quit |
 | `--diag` | Print collected state and exit (no TUI) |
-| `--theme` | `dark` (default) or `terminal` |
+| `--theme` | `dark` (default), `light`, `ocean`, `solarized`, `dracula`, `nord`, `terminal` |
 
 ### Themes
+
+Seven built-in themes, matching syswatch's set and cycle order:
+
+**dark** (default) · **light** · **ocean** · **solarized** · **dracula** · **nord** · **terminal**
 
 `terminal` pins no colors of its own — every slot resolves to an ANSI palette entry, and
 foreground and background use your terminal's own defaults. If you theme your whole desktop

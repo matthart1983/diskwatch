@@ -44,7 +44,17 @@ pub struct Theme {
     pub ok_bg: Color,
 }
 
-pub const THEME_NAMES: &[&str] = &["dark", "terminal"];
+/// Cycle order. Matches syswatch so the two tools feel the same when a
+/// user tabs through themes in both.
+pub const THEME_NAMES: &[&str] = &[
+    "dark",
+    "light",
+    "ocean",
+    "solarized",
+    "dracula",
+    "nord",
+    "terminal",
+];
 
 /// The original diskwatch palette. Hex values are byte-identical to the
 /// design handoff (`source/tui/grid.jsx` constant `C`) so the JSX mockups
@@ -69,6 +79,148 @@ pub const fn dark() -> Theme {
         warn_bg: Color::Rgb(0x3a, 0x2c, 0x14),
         err_bg: Color::Rgb(0x3a, 0x1c, 0x1c),
         ok_bg: Color::Rgb(0x16, 0x32, 0x1f),
+    }
+}
+
+/// Light theme, for terminals with a pale background.
+///
+/// The mapping needs care in one place: `white` and `br_white` are the
+/// *emphasis* slots — the strongest available text — so on a light
+/// background they go to near-black rather than to white. Wiring them
+/// literally would make selected rows and SMART headers invisible.
+///
+/// Contrast against the near-white bg (#f5f5f2):
+///   fg    #1e1e1e ≈ 14.5:1 AAA · dim #5a5a5a ≈ 5.7:1 AA
+///   faint #a0a0a0 ≈  2.5:1 — chrome only (borders), intentionally quiet
+pub const fn light() -> Theme {
+    Theme {
+        name: "light",
+        bg: Color::Rgb(0xf5, 0xf5, 0xf2),
+        fg: Color::Rgb(30, 30, 30),
+        dim: Color::Rgb(90, 90, 90),
+        faint: Color::Rgb(160, 160, 160),
+        red: Color::Rgb(180, 30, 30),
+        green: Color::Rgb(0, 120, 50),
+        yellow: Color::Rgb(170, 110, 0),
+        cyan: Color::Rgb(0, 100, 160),
+        magenta: Color::Rgb(120, 60, 160),
+        // Emphasis on a light bg is darker, not lighter.
+        white: Color::Rgb(0, 0, 0),
+        br_green: Color::Rgb(0, 150, 65),
+        br_cyan: Color::Rgb(0, 130, 200),
+        br_white: Color::Rgb(0, 0, 0),
+        sel_bg: Color::Rgb(220, 230, 240),
+        warn_bg: Color::Rgb(0xfa, 0xf0, 0xd6),
+        err_bg: Color::Rgb(0xfa, 0xdc, 0xdc),
+        ok_bg: Color::Rgb(0xdc, 0xea, 0xf7),
+    }
+}
+
+/// Apple Terminal.app "Ocean" profile — deep blue background, with the
+/// bright ANSI variants preferred for legibility against it.
+pub const fn ocean() -> Theme {
+    Theme {
+        name: "ocean",
+        bg: Color::Rgb(0x22, 0x4F, 0xBC),
+        fg: Color::Rgb(0xFF, 0xFF, 0xFF),
+        // Ocean's bright-black (#818383) fails AA on this bg, so chrome
+        // uses a lighter neutral. dim and faint land on the same value:
+        // anything fainter is unreadable over the blue.
+        dim: Color::Rgb(0xB5, 0xB6, 0xB7),
+        faint: Color::Rgb(0xB5, 0xB6, 0xB7),
+        red: Color::Rgb(0xFC, 0x39, 0x1F),
+        green: Color::Rgb(0x31, 0xE7, 0x22),
+        yellow: Color::Rgb(0xEA, 0xEC, 0x23),
+        cyan: Color::Rgb(0x14, 0xF0, 0xF0),
+        magenta: Color::Rgb(0xFF, 0x40, 0xFF),
+        white: Color::Rgb(0xCB, 0xCC, 0xCD),
+        br_green: Color::Rgb(0x31, 0xE7, 0x22),
+        br_cyan: Color::Rgb(0x14, 0xF0, 0xF0),
+        br_white: Color::Rgb(0xFF, 0xFF, 0xFF),
+        sel_bg: Color::Rgb(0x21, 0x6D, 0xFF),
+        warn_bg: Color::Rgb(0x3A, 0x4A, 0x12),
+        err_bg: Color::Rgb(0x4A, 0x1F, 0x1F),
+        ok_bg: Color::Rgb(0x1A, 0x3A, 0x6E),
+    }
+}
+
+/// Ethan Schoonover's Solarized Dark, using the canonical base/accent hexes.
+pub const fn solarized() -> Theme {
+    Theme {
+        name: "solarized",
+        bg: Color::Rgb(0, 43, 54),     // base03
+        fg: Color::Rgb(131, 148, 150), // base0
+        // base00, not base01. Solarized reserves base01 for de-emphasized
+        // comments and it lands at 2.8:1 on base03 — under the 3:1 floor.
+        // diskwatch leans on `dim` for real content (units, secondary
+        // values), so it takes the next step up at 3.4:1.
+        dim: Color::Rgb(101, 123, 131), // base00
+        faint: Color::Rgb(62, 84, 92),  // between base02 and base01
+        red: Color::Rgb(220, 50, 47),
+        green: Color::Rgb(133, 153, 0),
+        yellow: Color::Rgb(181, 137, 0),
+        cyan: Color::Rgb(42, 161, 152),
+        magenta: Color::Rgb(211, 54, 130),
+        white: Color::Rgb(147, 161, 161), // base1
+        br_green: Color::Rgb(152, 175, 0),
+        br_cyan: Color::Rgb(58, 180, 170),
+        br_white: Color::Rgb(238, 232, 213), // base2
+        sel_bg: Color::Rgb(7, 54, 66),       // base02
+        warn_bg: Color::Rgb(40, 36, 14),
+        err_bg: Color::Rgb(50, 18, 18),
+        ok_bg: Color::Rgb(10, 50, 60),
+    }
+}
+
+/// Dracula, using the canonical palette.
+pub const fn dracula() -> Theme {
+    Theme {
+        name: "dracula",
+        bg: Color::Rgb(40, 42, 54),
+        fg: Color::Rgb(248, 248, 242),
+        dim: Color::Rgb(98, 114, 164), // comment
+        faint: Color::Rgb(68, 71, 90),
+        red: Color::Rgb(255, 85, 85),
+        green: Color::Rgb(80, 250, 123),
+        yellow: Color::Rgb(241, 250, 140),
+        cyan: Color::Rgb(139, 233, 253),
+        magenta: Color::Rgb(189, 147, 249), // purple
+        white: Color::Rgb(248, 248, 242),
+        br_green: Color::Rgb(120, 255, 150),
+        br_cyan: Color::Rgb(170, 240, 255),
+        br_white: Color::Rgb(255, 255, 255),
+        sel_bg: Color::Rgb(68, 71, 90),
+        warn_bg: Color::Rgb(60, 50, 30),
+        err_bg: Color::Rgb(70, 30, 30),
+        ok_bg: Color::Rgb(35, 55, 70),
+    }
+}
+
+/// Nord, using the canonical Polar Night / Snow Storm / Frost / Aurora sets.
+pub const fn nord() -> Theme {
+    Theme {
+        name: "nord",
+        bg: Color::Rgb(46, 52, 64),    // polar night 0
+        fg: Color::Rgb(216, 222, 233), // snow storm 0
+        // Polar Night 3 (#4C566A) is what Nord editor themes use for
+        // comments, but it's a background shade — 1.7:1 on Polar Night 0,
+        // effectively invisible for the secondary values diskwatch puts in
+        // `dim`. Frost 2 is the nearest canonical color that carries text.
+        dim: Color::Rgb(129, 161, 193), // frost 2
+        faint: Color::Rgb(67, 76, 94),  // polar night 2
+        red: Color::Rgb(191, 97, 106),  // aurora red
+        green: Color::Rgb(163, 190, 140),
+        yellow: Color::Rgb(235, 203, 139),
+        cyan: Color::Rgb(136, 192, 208), // frost 1
+        magenta: Color::Rgb(180, 142, 173),
+        white: Color::Rgb(229, 233, 240),
+        br_green: Color::Rgb(180, 205, 160),
+        br_cyan: Color::Rgb(150, 205, 220),
+        br_white: Color::Rgb(236, 239, 244),
+        sel_bg: Color::Rgb(59, 66, 82),
+        warn_bg: Color::Rgb(60, 56, 40),
+        err_bg: Color::Rgb(60, 36, 38),
+        ok_bg: Color::Rgb(48, 62, 78),
     }
 }
 
@@ -121,6 +273,11 @@ pub fn by_name(name: &str) -> Theme {
         // reach for; accept both rather than silently falling back to dark
         // and looking like the feature is missing.
         "terminal" | "system" | "ansi" => terminal(),
+        "light" => light(),
+        "ocean" => ocean(),
+        "solarized" => solarized(),
+        "dracula" => dracula(),
+        "nord" => nord(),
         _ => dark(),
     }
 }
@@ -197,6 +354,76 @@ mod tests {
         assert_eq!(t.warn_bg, Color::Reset);
         assert_eq!(t.err_bg, Color::Reset);
         assert_eq!(t.ok_bg, Color::Reset);
+    }
+
+    /// WCAG relative luminance. Only defined for concrete RGB.
+    fn luminance(c: Color) -> Option<f64> {
+        let (r, g, b) = match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            _ => return None,
+        };
+        let ch = |v: u8| {
+            let s = v as f64 / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        Some(0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b))
+    }
+
+    fn contrast(a: Color, b: Color) -> Option<f64> {
+        let (la, lb) = (luminance(a)?, luminance(b)?);
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        Some((hi + 0.05) / (lo + 0.05))
+    }
+
+    #[test]
+    fn every_theme_has_readable_body_text() {
+        // The failure mode when adding a theme is text that disappears
+        // into its own background — a light palette wired up with light
+        // text, say. `terminal` is skipped: both slots are Reset, so the
+        // contrast is whatever the user's terminal defines.
+        for n in THEME_NAMES {
+            let t = by_name(n);
+            let Some(ratio) = contrast(t.fg, t.bg) else {
+                continue;
+            };
+            assert!(
+                ratio >= 4.5,
+                "{n}: body text contrast {ratio:.1}:1 is below WCAG AA (4.5:1)"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_keeps_muted_text_legible() {
+        // `dim` carries real content (units, secondary values), not just
+        // chrome, so it gets the 3:1 large-text floor rather than being
+        // allowed to fade out entirely. `faint` is borders only and is
+        // deliberately exempt.
+        for n in THEME_NAMES {
+            let t = by_name(n);
+            let Some(ratio) = contrast(t.dim, t.bg) else {
+                continue;
+            };
+            assert!(
+                ratio >= 3.0,
+                "{n}: dim text contrast {ratio:.1}:1 below 3:1"
+            );
+        }
+    }
+
+    #[test]
+    fn light_theme_emphasis_goes_darker_not_brighter() {
+        // `white` / `br_white` are the "strongest text" slots. Mapping them
+        // literally to white on a pale background hides selected rows and
+        // SMART headers completely.
+        let t = light();
+        let bg = luminance(t.bg).unwrap();
+        assert!(luminance(t.br_white).unwrap() < bg);
+        assert!(luminance(t.white).unwrap() < bg);
     }
 
     #[test]
