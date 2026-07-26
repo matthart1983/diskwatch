@@ -83,20 +83,26 @@ cargo build --release
 | `1`–`8` | Switch tabs |
 | `↑` / `↓` / `j` / `k` | Move selection (Devices, FS) |
 | `p` | Pause / resume sampling |
+| `,` | Settings (columns, temperature unit, SMART interval, theme) |
+| `?` | Help |
 | `q` / `Esc` | Quit |
 | `--diag` | Print collected state and exit (no TUI) |
 | `--theme` | `dark` (default) or `terminal` |
 
 ### Themes
 
-`--theme terminal` pins no colors of its own — every slot resolves to an ANSI palette entry,
-and foreground and background use your terminal's own defaults. If you theme your whole
-desktop with pywal, matugen, or a terminal profile, this is the one that follows along.
-It's also accepted as `--theme system` or `--theme ansi`.
+`terminal` pins no colors of its own — every slot resolves to an ANSI palette entry, and
+foreground and background use your terminal's own defaults. If you theme your whole desktop
+with pywal, matugen, or a terminal profile, this is the one that follows along.
+
+Switch it live from the settings overlay (`,` → **Theme** → `Space`), or start with it:
 
 ```bash
-diskwatch --theme terminal
+diskwatch --theme terminal      # also accepts: system, ansi
 ```
+
+The choice isn't persisted between runs — like the other settings, it resets to `dark` on
+restart. Use the flag to make it stick.
 
 ## Tabs in detail
 

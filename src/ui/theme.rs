@@ -135,9 +135,17 @@ pub fn set_by_name(name: &str) {
     *ACTIVE.write().expect("theme lock poisoned") = by_name(name);
 }
 
-#[allow(dead_code)]
 pub fn name() -> &'static str {
     active().name
+}
+
+/// Advance to the next built-in theme, wrapping. Returns the new name.
+pub fn cycle() -> &'static str {
+    let current = name();
+    let i = THEME_NAMES.iter().position(|n| *n == current).unwrap_or(0);
+    let next = THEME_NAMES[(i + 1) % THEME_NAMES.len()];
+    set_by_name(next);
+    next
 }
 
 #[cfg(test)]
@@ -189,6 +197,20 @@ mod tests {
         assert_eq!(t.warn_bg, Color::Reset);
         assert_eq!(t.err_bg, Color::Reset);
         assert_eq!(t.ok_bg, Color::Reset);
+    }
+
+    #[test]
+    fn cycle_visits_every_theme_and_returns_home() {
+        let start = name();
+        let mut seen = Vec::new();
+        for _ in 0..THEME_NAMES.len() {
+            seen.push(cycle());
+        }
+        seen.sort_unstable();
+        let mut expected = THEME_NAMES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(seen, expected);
+        assert_eq!(name(), start, "a full cycle must land back where it began");
     }
 
     #[test]

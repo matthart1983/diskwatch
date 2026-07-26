@@ -427,9 +427,9 @@ fn picker_active(app: &App) -> bool {
 
 // Settings modal: how many rows in the dialog. Kept as a constant so
 // `handle_settings_key` and `draw_settings_overlay` agree on the bounds.
-const SETTINGS_ROWS: usize = 7;
+const SETTINGS_ROWS: usize = 8;
 // Below this index, rows are toggles (column visibility bitflags);
-// at or above, rows are cycle setters (temp unit, SMART interval).
+// at or above, rows are cycle setters (temp unit, SMART interval, theme).
 const SETTINGS_FIRST_CYCLE: usize = 5;
 
 fn handle_settings_key(app: &mut App, key: KeyCode) {
@@ -476,6 +476,13 @@ fn handle_settings_key(app: &mut App, key: KeyCode) {
                     app.smart_interval_label = format_smart_label(next);
                     app.smart.set_interval(Duration::from_secs(next));
                     app.smart_refresh_requested = true;
+                }
+                7 => {
+                    // Theme lives in a global rather than on App, so the
+                    // palette accessors can read it without threading a
+                    // reference through every render fn. Nothing to store
+                    // here — the next draw picks it up.
+                    crate::ui::theme::cycle();
                 }
                 _ => {}
             }
@@ -762,6 +769,14 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         (
             "SMART poll interval",
             format!("{} (r refreshes now)", app.smart_interval_label),
+        ),
+        (
+            // Value stays a bare name: the popup is 60 cols and the row
+            // renderer truncates, so an explanatory parenthetical here
+            // gets cut off mid-word. What `terminal` means is documented
+            // in the README and `--help`.
+            "Theme",
+            crate::ui::theme::name().to_string(),
         ),
     ];
 
