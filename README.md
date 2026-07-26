@@ -4,9 +4,11 @@
     <strong>Single-host disk diagnostics in your terminal. The terminal you open when the disk light won't stop blinking — before you reach for iostat, iotop, smartctl, lsblk, df, du, and a panic.</strong>
   </p>
   <p align="center">
+    <a href="https://crates.io/crates/diskwatch"><img src="https://img.shields.io/crates/v/diskwatch.svg" alt="crates.io"></a>
+    <a href="https://github.com/matthart1983/diskwatch/releases"><img src="https://img.shields.io/github/v/release/matthart1983/diskwatch" alt="Release"></a>
+    <a href="https://repology.org/project/diskwatch/versions"><img src="https://repology.org/badge/tiny-repos/diskwatch.svg" alt="Packaging status"></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <img src="https://img.shields.io/badge/status-v0.1-yellow" alt="Status">
   </p>
 </p>
 
@@ -38,14 +40,17 @@ Where `lsblk` shows you *which disks exist*, DiskWatch shows you *what's happeni
 ## Install
 
 ```bash
-# Homebrew (macOS / Linux)
-brew install matthart1983/tap/diskwatch
-
-# Cargo
-cargo install diskwatch
-
-# Pre-built binaries — see Releases
+brew install diskwatch                # macOS / Linux
+nix-shell -p diskwatch                # NixOS / Nix
+paru -S diskwatch                     # Arch
+cargo install diskwatch               # anywhere with Rust
 ```
+
+Or grab a pre-built binary from [Releases](https://github.com/matthart1983/diskwatch/releases/latest).
+
+The Nix and Arch packages are maintained by community packagers — thank you. File packaging
+issues with them; file diskwatch bugs here. The [Repology page](https://repology.org/project/diskwatch/versions)
+shows which packages are current.
 
 <details>
 <summary><strong>All platforms & options</strong></summary>
