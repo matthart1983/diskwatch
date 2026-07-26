@@ -1,6 +1,6 @@
 [package]
 name = "diskwatch"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.75"
 description = "Single-host, read-only disk diagnostics TUI. Eight tabs across devices, volumes, filesystems, IO, SMART, hot files, and insights. Sibling to netwatch and syswatch."
