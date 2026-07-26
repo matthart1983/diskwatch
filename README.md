@@ -85,6 +85,18 @@ cargo build --release
 | `p` | Pause / resume sampling |
 | `q` / `Esc` | Quit |
 | `--diag` | Print collected state and exit (no TUI) |
+| `--theme` | `dark` (default) or `terminal` |
+
+### Themes
+
+`--theme terminal` pins no colors of its own — every slot resolves to an ANSI palette entry,
+and foreground and background use your terminal's own defaults. If you theme your whole
+desktop with pywal, matugen, or a terminal profile, this is the one that follows along.
+It's also accepted as `--theme system` or `--theme ansi`.
+
+```bash
+diskwatch --theme terminal
+```
 
 ## Tabs in detail
 

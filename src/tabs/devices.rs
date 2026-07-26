@@ -32,25 +32,25 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 fn draw_filter_row(f: &mut Frame, area: Rect, count: usize) {
     let left = Line::from(vec![
         Span::raw(" "),
-        Span::styled("sort", Style::default().fg(p::DIM)),
+        Span::styled("sort", Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(
             "size",
             Style::default()
-                .fg(p::BR_WHITE)
+                .fg(p::br_white())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("io", Style::default().fg(p::FG)),
+        Span::styled("io", Style::default().fg(p::fg())),
         Span::raw("  "),
-        Span::styled("temp", Style::default().fg(p::FG)),
+        Span::styled("temp", Style::default().fg(p::fg())),
         Span::raw("  "),
-        Span::styled("wear", Style::default().fg(p::FG)),
+        Span::styled("wear", Style::default().fg(p::fg())),
         Span::raw("  "),
-        Span::styled("model", Style::default().fg(p::FG)),
+        Span::styled("model", Style::default().fg(p::fg())),
     ]);
     f.render_widget(
-        Paragraph::new(left).style(Style::default().bg(p::BG)),
+        Paragraph::new(left).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -64,9 +64,9 @@ fn draw_filter_row(f: &mut Frame, area: Rect, count: usize) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             right_text,
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )))
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         Rect {
             x: area.x + area.width.saturating_sub(right_w),
             y: area.y,
@@ -79,12 +79,12 @@ fn draw_filter_row(f: &mut Frame, area: Rect, count: usize) {
 fn draw_device_table(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " BLOCK DEVICES ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -98,9 +98,9 @@ fn draw_device_table(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             header.to_string(),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )))
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -114,7 +114,7 @@ fn draw_device_table(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,
-            Style::default().fg(p::FAINT).bg(p::BG),
+            Style::default().fg(p::faint()).bg(p::bg()),
         ))),
         Rect {
             x: inner.x + 1,
@@ -147,15 +147,15 @@ fn draw_device_table(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, selected: bool) {
     let dot_color = if d.idle {
-        p::DIM
+        p::dim()
     } else {
         match d.kind {
-            DeviceKind::UsbMassStorage => p::MAGENTA,
-            DeviceKind::Hdd => p::GREEN,
-            _ => p::GREEN,
+            DeviceKind::UsbMassStorage => p::magenta(),
+            DeviceKind::Hdd => p::green(),
+            _ => p::green(),
         }
     };
-    let name_color = if d.idle { p::DIM } else { p::FG };
+    let name_color = if d.idle { p::dim() } else { p::fg() };
     let used_pct = if d.size_bytes > 0 {
         (d.used_bytes as f64 / d.size_bytes as f64 * 100.0).round() as u32
     } else {
@@ -168,11 +168,11 @@ fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, select
         Span::styled("\u{25cf}", Style::default().fg(dot_color)),
         Span::raw(" "),
         Span::styled(pad_right(&d.name, 11), Style::default().fg(name_color)),
-        Span::styled(pad_right(&d.model, 32), Style::default().fg(p::FG)),
-        Span::styled(pad_right(&d.bus, 20), Style::default().fg(p::DIM)),
+        Span::styled(pad_right(&d.model, 32), Style::default().fg(p::fg())),
+        Span::styled(pad_right(&d.bus, 20), Style::default().fg(p::dim())),
         Span::styled(
             pad_left(&fmt_size(d.size_bytes), 8),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
         Span::raw("  "),
         Span::styled(
@@ -194,9 +194,9 @@ fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, select
     };
     f.render_widget(
         Paragraph::new(primary).style(Style::default().bg(if selected {
-            p::SEL_BG
+            p::sel_bg()
         } else {
-            p::BG
+            p::bg()
         })),
         area,
     );
@@ -204,24 +204,24 @@ fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, select
     // Second row: serial + state, mirroring the JSX layout.
     let serial = d.serial.as_deref().unwrap_or("—");
     let state = if d.idle {
-        ("no usable space reported".to_string(), p::DIM)
+        ("no usable space reported".to_string(), p::dim())
     } else {
         match d.smart_ok {
-            Some(true) => ("smart verified".to_string(), p::GREEN),
-            Some(false) => ("SMART FAILING".to_string(), p::RED),
+            Some(true) => ("smart verified".to_string(), p::green()),
+            Some(false) => ("SMART FAILING".to_string(), p::red()),
             None => (
                 if d.is_removable {
                     "removable".to_string()
                 } else {
                     "—".to_string()
                 },
-                p::DIM,
+                p::dim(),
             ),
         }
     };
     let sub_line = Line::from(vec![
         Span::raw("       "),
-        Span::styled(pad_right(serial, 22), Style::default().fg(p::DIM)),
+        Span::styled(pad_right(serial, 22), Style::default().fg(p::dim())),
         Span::styled(state.0, Style::default().fg(state.1)),
     ]);
     let sub_area = Rect {
@@ -232,9 +232,9 @@ fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, select
     };
     f.render_widget(
         Paragraph::new(sub_line).style(Style::default().bg(if selected {
-            p::SEL_BG
+            p::sel_bg()
         } else {
-            p::BG
+            p::bg()
         })),
         sub_area,
     );
@@ -251,15 +251,15 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     // Left: per-device detail
     let left_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             match sel {
                 Some(d) => format!(" {}  DETAIL ", d.name),
                 None => " DETAIL ".to_string(),
             },
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let left_inner = left_block.inner(split[0]);
     f.render_widget(left_block, split[0]);
 
@@ -271,26 +271,34 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         };
         let used_color = usage_color(used_pct);
         let (smart_text, smart_color) = match d.smart_ok {
-            Some(true) => ("verified".to_string(), p::GREEN),
-            Some(false) => ("FAILING".to_string(), p::RED),
-            None => ("—".to_string(), p::DIM),
+            Some(true) => ("verified".to_string(), p::green()),
+            Some(false) => ("FAILING".to_string(), p::red()),
+            None => ("—".to_string(), p::dim()),
         };
         let mut rows = vec![
-            kv("device", &d.name, p::FG),
+            kv("device", &d.name, p::fg()),
             kv("kind", d.kind.label(), kind_color(d.kind)),
-            kv("model", &d.model, p::FG),
-            kv("bus", &d.bus, p::FG),
+            kv("model", &d.model, p::fg()),
+            kv("bus", &d.bus, p::fg()),
             kv(
                 "serial",
                 d.serial.as_deref().unwrap_or("—"),
-                if d.serial.is_some() { p::FG } else { p::DIM },
+                if d.serial.is_some() {
+                    p::fg()
+                } else {
+                    p::dim()
+                },
             ),
             kv(
                 "firmware",
                 d.firmware.as_deref().unwrap_or("—"),
-                if d.firmware.is_some() { p::FG } else { p::DIM },
+                if d.firmware.is_some() {
+                    p::fg()
+                } else {
+                    p::dim()
+                },
             ),
-            kv("capacity", &fmt_size(d.size_bytes), p::FG),
+            kv("capacity", &fmt_size(d.size_bytes), p::fg()),
             kv(
                 "used",
                 &format!("{} ({}%)", fmt_size(d.used_bytes), used_pct),
@@ -299,17 +307,17 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             kv(
                 "removable",
                 if d.is_removable { "yes" } else { "no" },
-                p::FG,
+                p::fg(),
             ),
             kv("SMART", &smart_text, smart_color),
         ];
         rows.push(Line::from(""));
         rows.push(Line::from(Span::styled(
             " temp / wear / power-on hours pending smartctl",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )));
         f.render_widget(
-            Paragraph::new(rows).style(Style::default().bg(p::BG)),
+            Paragraph::new(rows).style(Style::default().bg(p::bg())),
             left_inner,
         );
     }
@@ -317,49 +325,49 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     // Right: latency histogram placeholder
     let right_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " LATENCY hist  read ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let right_inner = right_block.inner(split[1]);
     f.render_widget(right_block, split[1]);
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  awaiting per-device IO sampler",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "  Linux: eBPF biolatency (CAP_BPF)",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
         Line::from(Span::styled(
             "  macOS: IOKit IOStorageDeviceCharacteristics",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         right_inner,
     );
 }
 
 fn kv(key: &str, val: &str, val_color: ratatui::style::Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" {:<14}", key), Style::default().fg(p::DIM)),
+        Span::styled(format!(" {:<14}", key), Style::default().fg(p::dim())),
         Span::styled(val.to_string(), Style::default().fg(val_color)),
     ])
 }
 
 fn kind_color(k: DeviceKind) -> ratatui::style::Color {
     match k {
-        DeviceKind::Nvme => p::CYAN,
-        DeviceKind::Ssd => p::GREEN,
-        DeviceKind::Hdd => p::GREEN,
-        DeviceKind::UsbMassStorage => p::MAGENTA,
-        DeviceKind::Unknown => p::DIM,
+        DeviceKind::Nvme => p::cyan(),
+        DeviceKind::Ssd => p::green(),
+        DeviceKind::Hdd => p::green(),
+        DeviceKind::UsbMassStorage => p::magenta(),
+        DeviceKind::Unknown => p::dim(),
     }
 }

@@ -557,7 +557,7 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     }
     // Paint the whole canvas with the terminal-bg before chrome draws, so
     // unfilled regions don't show through with the host terminal's default.
-    f.render_widget(Paragraph::new("").style(Style::default().bg(p::BG)), full);
+    f.render_widget(Paragraph::new("").style(Style::default().bg(p::bg())), full);
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -623,22 +623,22 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::CYAN))
+        .border_style(Style::default().fg(p::cyan()))
         .title(Span::styled(
             " DiskWatch — key bindings ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
     let key = |k: &'static str| {
         Span::styled(
             format!(" {:<10}", k),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         )
     };
-    let desc = |d: &'static str| Span::styled(d, Style::default().fg(p::FG));
+    let desc = |d: &'static str| Span::styled(d, Style::default().fg(p::fg()));
 
     let lines = vec![
         Line::from(""),
@@ -665,7 +665,7 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "  press any key to dismiss",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
@@ -699,12 +699,12 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::CYAN))
+        .border_style(Style::default().fg(p::cyan()))
         .title(Span::styled(
             " DiskWatch — settings ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
@@ -768,7 +768,7 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         "  Move: ↑ ↓   Toggle: Space / Enter   Close: Esc / , / q",
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     )));
     lines.push(Line::from(""));
     for (i, (label, value)) in rows.iter().enumerate() {
@@ -778,18 +778,18 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
             "   "
         };
         let is_cycle = i >= SETTINGS_FIRST_CYCLE;
-        let label_color = if is_cycle { p::YELLOW } else { p::FG };
+        let label_color = if is_cycle { p::yellow() } else { p::fg() };
         let value_color = if is_cycle {
-            p::CYAN
+            p::cyan()
         } else if value.contains("[x]") {
-            p::GREEN
+            p::green()
         } else {
-            p::DIM
+            p::dim()
         };
         let marker_color = if i == app.settings_cursor {
-            p::BR_WHITE
+            p::br_white()
         } else {
-            p::DIM
+            p::dim()
         };
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
@@ -800,7 +800,7 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  (settings persist for this session only)",
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     )));
 
     f.render_widget(Paragraph::new(lines), inner);

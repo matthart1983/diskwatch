@@ -32,29 +32,29 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 fn draw_device_picker(f: &mut Frame, area: Rect, app: &App) {
     let mut spans: Vec<Span> = vec![
         Span::raw(" "),
-        Span::styled("device", Style::default().fg(p::DIM)),
+        Span::styled("device", Style::default().fg(p::dim())),
         Span::raw("  "),
     ];
     for (i, d) in app.devices.iter().enumerate() {
         let selected = i == app.selected_device;
         let badge = match d.smart_ok {
-            Some(true) => ("ok", p::GREEN),
-            Some(false) => ("FAIL", p::RED),
-            None => ("—", p::DIM),
+            Some(true) => ("ok", p::green()),
+            Some(false) => ("FAIL", p::red()),
+            None => ("—", p::dim()),
         };
         let label = format!("{} {}", d.name, badge.0);
         if selected {
             spans.push(Span::styled(
                 label,
                 Style::default()
-                    .fg(p::BR_WHITE)
-                    .bg(p::SEL_BG)
+                    .fg(p::br_white())
+                    .bg(p::sel_bg())
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
                 format!("{} ", d.name),
-                Style::default().fg(p::FG),
+                Style::default().fg(p::fg()),
             ));
             spans.push(Span::styled(
                 badge.0.to_string(),
@@ -64,7 +64,7 @@ fn draw_device_picker(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw("  "));
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -80,12 +80,12 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             format!(" {}  SMART ", d.name),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -116,9 +116,9 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(countdown, Style::default().fg(p::DIM))),
+                Line::from(Span::styled(countdown, Style::default().fg(p::dim()))),
             ])
-            .style(Style::default().bg(p::BG)),
+            .style(Style::default().bg(p::bg())),
             split[1],
         );
         return;
@@ -142,23 +142,23 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
 fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {
     let smart_summary = match d.smart_ok {
         Some(true) => Line::from(vec![
-            Span::styled("  SMART status: ", Style::default().fg(p::DIM)),
+            Span::styled("  SMART status: ", Style::default().fg(p::dim())),
             Span::styled(
                 "verified",
-                Style::default().fg(p::GREEN).add_modifier(Modifier::BOLD),
+                Style::default().fg(p::green()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  (via diskutil)", Style::default().fg(p::DIM)),
+            Span::styled("  (via diskutil)", Style::default().fg(p::dim())),
         ]),
         Some(false) => Line::from(vec![
-            Span::styled("  SMART status: ", Style::default().fg(p::DIM)),
+            Span::styled("  SMART status: ", Style::default().fg(p::dim())),
             Span::styled(
                 "FAILING",
-                Style::default().fg(p::RED).add_modifier(Modifier::BOLD),
+                Style::default().fg(p::red()).add_modifier(Modifier::BOLD),
             ),
         ]),
         None => Line::from(Span::styled(
             "  SMART status: not reported by this controller",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
     };
 
@@ -168,24 +168,24 @@ fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {
         Line::from(""),
         Line::from(Span::styled(
             "  Full SMART attributes (temperature, wear, power-on hours,",
-            Style::default().fg(p::FG),
+            Style::default().fg(p::fg()),
         )),
         Line::from(Span::styled(
             "  per-attribute thresholds) need `smartctl` on PATH.",
-            Style::default().fg(p::FG),
+            Style::default().fg(p::fg()),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "    macOS:  brew install smartmontools",
-            Style::default().fg(p::CYAN),
+            Style::default().fg(p::cyan()),
         )),
         Line::from(Span::styled(
             "    Linux:  apt install smartmontools  (or pacman / dnf)",
-            Style::default().fg(p::CYAN),
+            Style::default().fg(p::cyan()),
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         area,
     );
 }
@@ -202,30 +202,30 @@ fn draw_summary(
         .map(|t| unit.format_temp(t))
         .unwrap_or_else(|| "—".to_string());
     let temp_color = match tick.temperature_c {
-        Some(t) if t >= 70 => p::RED,
-        Some(t) if t >= 55 => p::YELLOW,
-        Some(_) => p::FG,
-        None => p::DIM,
+        Some(t) if t >= 70 => p::red(),
+        Some(t) if t >= 55 => p::yellow(),
+        Some(_) => p::fg(),
+        None => p::dim(),
     };
     let wear = tick
         .percentage_used
         .map(|n| format!("{}%", n))
         .unwrap_or_else(|| "—".to_string());
     let wear_color = match tick.percentage_used {
-        Some(n) if n >= 80 => p::RED,
-        Some(n) if n >= 50 => p::YELLOW,
-        Some(_) => p::FG,
-        None => p::DIM,
+        Some(n) if n >= 80 => p::red(),
+        Some(n) if n >= 50 => p::yellow(),
+        Some(_) => p::fg(),
+        None => p::dim(),
     };
     let spare = tick
         .available_spare
         .map(|n| format!("{}%", n))
         .unwrap_or_else(|| "—".to_string());
     let spare_color = match tick.available_spare {
-        Some(n) if n <= 10 => p::RED,
-        Some(n) if n <= 30 => p::YELLOW,
-        Some(_) => p::GREEN,
-        None => p::DIM,
+        Some(n) if n <= 10 => p::red(),
+        Some(n) if n <= 30 => p::yellow(),
+        Some(_) => p::green(),
+        None => p::dim(),
     };
     let units_to_bytes = |units: u64| units.saturating_mul(512_000);
     let host_writes = tick
@@ -238,8 +238,8 @@ fn draw_summary(
         .unwrap_or_else(|| "—".to_string());
 
     let lines = vec![
-        kv("device", &d.name, p::FG),
-        kv("model", &d.model, p::FG),
+        kv("device", &d.name, p::fg()),
+        kv("model", &d.model, p::fg()),
         Line::from(""),
         kv("temperature", &temp, temp_color),
         kv("wear (used%)", &wear, wear_color),
@@ -251,7 +251,7 @@ fn draw_summary(
                 .power_on_hours
                 .map(|h| format!("{} ({:.1} days)", h, h as f64 / 24.0))
                 .unwrap_or_else(|| "—".to_string()),
-            p::FG,
+            p::fg(),
         ),
         kv(
             "power cycles",
@@ -259,14 +259,14 @@ fn draw_summary(
                 .power_cycles
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "—".to_string()),
-            p::FG,
+            p::fg(),
         ),
         Line::from(""),
-        kv("host writes", &host_writes, p::FG),
-        kv("host reads", &host_reads, p::FG),
+        kv("host writes", &host_writes, p::fg()),
+        kv("host reads", &host_reads, p::fg()),
     ];
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         area,
     );
 }
@@ -275,36 +275,36 @@ fn draw_ata_table(f: &mut Frame, area: Rect, tick: &SmartTick) {
     let header = "   ID  ATTRIBUTE                         VALUE   WORST   THRESH  RAW";
     let mut lines = vec![Line::from(Span::styled(
         header.to_string(),
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     ))];
     let rule: String = "\u{2500}".repeat(area.width.saturating_sub(2) as usize);
     lines.push(Line::from(Span::styled(
         rule,
-        Style::default().fg(p::FAINT),
+        Style::default().fg(p::faint()),
     )));
     for a in &tick.ata_attrs {
         let critical = matches!(a.id, 5 | 10 | 187 | 196 | 197 | 198);
         let warn = critical && a.value < a.worst;
-        let row_color = if warn { p::YELLOW } else { p::FG };
-        let dot_color = if warn { p::YELLOW } else { p::GREEN };
+        let row_color = if warn { p::yellow() } else { p::fg() };
+        let dot_color = if warn { p::yellow() } else { p::green() };
         lines.push(Line::from(vec![
             Span::raw(" "),
             Span::styled("\u{25cf}", Style::default().fg(dot_color)),
             Span::raw(" "),
             Span::styled(
                 pad_left(&format!("{:02X}", a.id), 3),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ),
             Span::raw("  "),
             Span::styled(pad_right(&a.name, 32), Style::default().fg(row_color)),
             Span::styled(
                 pad_left(&a.value.to_string(), 5),
-                Style::default().fg(p::FG),
+                Style::default().fg(p::fg()),
             ),
             Span::raw("  "),
             Span::styled(
                 pad_left(&a.worst.to_string(), 5),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ),
             Span::raw("  "),
             Span::styled(
@@ -314,21 +314,21 @@ fn draw_ata_table(f: &mut Frame, area: Rect, tick: &SmartTick) {
                         .unwrap_or_else(|| "—".into()),
                     5,
                 ),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ),
             Span::raw("  "),
-            Span::styled(a.raw.clone(), Style::default().fg(p::FG)),
+            Span::styled(a.raw.clone(), Style::default().fg(p::fg())),
         ]));
     }
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         area,
     );
 }
 
 fn kv(key: &str, val: &str, val_color: ratatui::style::Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" {:<16}", key), Style::default().fg(p::DIM)),
+        Span::styled(format!(" {:<16}", key), Style::default().fg(p::dim())),
         Span::styled(val.to_string(), Style::default().fg(val_color)),
     ])
 }
@@ -342,24 +342,24 @@ fn draw_root_banner(f: &mut Frame, area: Rect) {
     }
     let line = if running_as_root() {
         Line::from(vec![
-            Span::styled(" ✓ running as root — ", Style::default().fg(p::GREEN)),
-            Span::styled("full SMART data available", Style::default().fg(p::DIM)),
+            Span::styled(" ✓ running as root — ", Style::default().fg(p::green())),
+            Span::styled("full SMART data available", Style::default().fg(p::dim())),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" ⚠ ", Style::default().fg(p::YELLOW)),
+            Span::styled(" ⚠ ", Style::default().fg(p::yellow())),
             Span::styled(
                 "for SMART statistics (temperature, wear, hours), launch with: ",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ),
             Span::styled(
                 "sudo diskwatch",
-                Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+                Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
             ),
         ])
     };
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,

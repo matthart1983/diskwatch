@@ -1,28 +1,72 @@
-//! Color palette matching `source/tui/grid.jsx` constant `C`.
-//! Hex values byte-identical to the design handoff so JSX mockups and
-//! the real terminal render the same.
+//! Color accessors for the diskwatch UI.
+//!
+//! Every read routes through the active theme (`crate::ui::theme`), so
+//! switching themes recolors the whole UI on the next draw. These were plain
+//! `const`s until the `terminal` theme landed; they are functions now purely
+//! so the values can vary at runtime. The `dark` theme still holds the
+//! byte-identical design-handoff hexes that used to live here.
 
 #![allow(dead_code)]
 
 use ratatui::style::Color;
 
-pub const BG: Color = Color::Rgb(0x0c, 0x14, 0x18);
-pub const FG: Color = Color::Rgb(0xc5, 0xd1, 0xd6);
-pub const DIM: Color = Color::Rgb(0x6b, 0x80, 0x88);
-pub const FAINT: Color = Color::Rgb(0x44, 0x56, 0x60);
+use crate::ui::theme;
 
-pub const RED: Color = Color::Rgb(0xff, 0x78, 0x78);
-pub const GREEN: Color = Color::Rgb(0x5c, 0xd9, 0x89);
-pub const YELLOW: Color = Color::Rgb(0xf0, 0xc0, 0x60);
-pub const CYAN: Color = Color::Rgb(0x5f, 0xdc, 0xff);
-pub const MAGENTA: Color = Color::Rgb(0xd9, 0x7a, 0xff);
-pub const WHITE: Color = Color::Rgb(0xe6, 0xf0, 0xf2);
+// ── Surface / text ─────────────────────────────────────────
+pub fn bg() -> Color {
+    theme::active().bg
+}
+pub fn fg() -> Color {
+    theme::active().fg
+}
+pub fn dim() -> Color {
+    theme::active().dim
+}
+pub fn faint() -> Color {
+    theme::active().faint
+}
 
-pub const BR_GREEN: Color = Color::Rgb(0x9a, 0xe6, 0xb4);
-pub const BR_CYAN: Color = Color::Rgb(0x86, 0xe6, 0xff);
-pub const BR_WHITE: Color = Color::Rgb(0xff, 0xff, 0xff);
+// ── Base colors ────────────────────────────────────────────
+pub fn red() -> Color {
+    theme::active().red
+}
+pub fn green() -> Color {
+    theme::active().green
+}
+pub fn yellow() -> Color {
+    theme::active().yellow
+}
+pub fn cyan() -> Color {
+    theme::active().cyan
+}
+pub fn magenta() -> Color {
+    theme::active().magenta
+}
+pub fn white() -> Color {
+    theme::active().white
+}
 
-pub const SEL_BG: Color = Color::Rgb(0x1a, 0x33, 0x40);
-pub const WARN_BG: Color = Color::Rgb(0x3a, 0x2c, 0x14);
-pub const ERR_BG: Color = Color::Rgb(0x3a, 0x1c, 0x1c);
-pub const OK_BG: Color = Color::Rgb(0x16, 0x32, 0x1f);
+// ── Bright variants ────────────────────────────────────────
+pub fn br_green() -> Color {
+    theme::active().br_green
+}
+pub fn br_cyan() -> Color {
+    theme::active().br_cyan
+}
+pub fn br_white() -> Color {
+    theme::active().br_white
+}
+
+// ── Backgrounds ────────────────────────────────────────────
+pub fn sel_bg() -> Color {
+    theme::active().sel_bg
+}
+pub fn warn_bg() -> Color {
+    theme::active().warn_bg
+}
+pub fn err_bg() -> Color {
+    theme::active().err_bg
+}
+pub fn ok_bg() -> Color {
+    theme::active().ok_bg
+}

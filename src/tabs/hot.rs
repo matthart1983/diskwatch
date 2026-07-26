@@ -45,19 +45,22 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![
         Span::raw(" "),
-        Span::styled("watch", Style::default().fg(p::DIM)),
+        Span::styled("watch", Style::default().fg(p::dim())),
         Span::raw("  "),
     ];
     if let Some(e) = &err {
         spans.push(Span::styled(
             format!("ERROR: {}", e),
-            Style::default().fg(p::RED).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::red()).add_modifier(Modifier::BOLD),
         ));
     } else if roots.is_empty() {
-        spans.push(Span::styled("(no roots)", Style::default().fg(p::DIM)));
+        spans.push(Span::styled("(no roots)", Style::default().fg(p::dim())));
     } else {
         let joined: Vec<String> = roots.iter().map(|p| p.display().to_string()).collect();
-        spans.push(Span::styled(joined.join("  "), Style::default().fg(p::FG)));
+        spans.push(Span::styled(
+            joined.join("  "),
+            Style::default().fg(p::fg()),
+        ));
     }
     spans.push(Span::raw("   "));
     spans.push(Span::styled(
@@ -65,10 +68,10 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
             "{} active paths  {} events since start",
             active, total_events
         ),
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     ));
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -81,12 +84,12 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
 fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " HOT FILES  by event rate ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 3 {
@@ -98,9 +101,9 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             header.to_string(),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )))
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -112,7 +115,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,
-            Style::default().fg(p::FAINT).bg(p::BG),
+            Style::default().fg(p::faint()).bg(p::bg()),
         ))),
         Rect {
             x: inner.x + 1,
@@ -135,8 +138,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         };
         drop(s);
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(p::DIM))))
-                .style(Style::default().bg(p::BG)),
+            Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(p::dim()))))
+                .style(Style::default().bg(p::bg())),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 2,
@@ -173,26 +176,26 @@ fn draw_row(f: &mut Frame, x: u16, y: u16, w: u16, fa: &FileActivity, now: Insta
         "—".to_string()
     };
     let rate_color = if fa.events_per_sec >= 20.0 {
-        p::YELLOW
+        p::yellow()
     } else if fa.events_per_sec >= 5.0 {
-        p::BR_CYAN
+        p::br_cyan()
     } else if fa.events_per_sec >= 1.0 {
-        p::FG
+        p::fg()
     } else {
-        p::DIM
+        p::dim()
     };
-    let dot = if leader { p::YELLOW } else { p::GREEN };
+    let dot = if leader { p::yellow() } else { p::green() };
     let kind_color = match fa.last_kind {
-        ActivityKind::Created => p::GREEN,
-        ActivityKind::Modified => p::CYAN,
-        ActivityKind::Removed => p::RED,
-        ActivityKind::Renamed => p::MAGENTA,
-        _ => p::DIM,
+        ActivityKind::Created => p::green(),
+        ActivityKind::Modified => p::cyan(),
+        ActivityKind::Removed => p::red(),
+        ActivityKind::Renamed => p::magenta(),
+        _ => p::dim(),
     };
     let path = display_path(&fa.path.display().to_string(), 68);
     let age = age_label(now.duration_since(fa.last_seen));
 
-    let row_bg = if leader { p::SEL_BG } else { p::BG };
+    let row_bg = if leader { p::sel_bg() } else { p::bg() };
     f.render_widget(
         Paragraph::new("").style(Style::default().bg(row_bg)),
         Rect {
@@ -206,7 +209,7 @@ fn draw_row(f: &mut Frame, x: u16, y: u16, w: u16, fa: &FileActivity, now: Insta
         Span::raw(" "),
         Span::styled("\u{25cf}", Style::default().fg(dot)),
         Span::raw(" "),
-        Span::styled(pad_right(&path, 68), Style::default().fg(p::FG)),
+        Span::styled(pad_right(&path, 68), Style::default().fg(p::fg())),
         Span::raw(" "),
         Span::styled(
             pad_left(&rate_str, 6),
@@ -219,10 +222,10 @@ fn draw_row(f: &mut Frame, x: u16, y: u16, w: u16, fa: &FileActivity, now: Insta
         Span::raw("  "),
         Span::styled(
             pad_left(&fa.total_events.to_string(), 6),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
         Span::raw("  "),
-        Span::styled(pad_left(&age, 4), Style::default().fg(p::DIM)),
+        Span::styled(pad_left(&age, 4), Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(
             fa.last_kind.label().to_string(),
@@ -243,25 +246,25 @@ fn draw_row(f: &mut Frame, x: u16, y: u16, w: u16, fa: &FileActivity, now: Insta
 fn draw_banner(f: &mut Frame, area: Rect, _app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
-        .style(Style::default().bg(p::BG));
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let lines = vec![
         Line::from(vec![
-            Span::styled(" note  ", Style::default().fg(p::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(" note  ", Style::default().fg(p::yellow()).add_modifier(Modifier::BOLD)),
             Span::styled(
                 "FSEvents reports paths + kinds, not bytes or pids.",
-                Style::default().fg(p::FG),
+                Style::default().fg(p::fg()),
             ),
         ]),
         Line::from(Span::styled(
             "       Per-byte attribution needs fs_usage (root) or eBPF; per-process needs Endpoint Security entitlement.",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         inner,
     );
 }

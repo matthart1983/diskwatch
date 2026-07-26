@@ -18,10 +18,30 @@ struct Cli {
     #[arg(long)]
     tab: Option<String>,
 
+    /// Color theme: "dark" (default) or "terminal" to use the colors your
+    /// terminal already defines, so system-wide themes carry over.
+    #[arg(long, default_value = "dark", value_parser = parse_theme)]
+    theme: String,
+
     /// Print collected state and exit without launching the TUI.
     /// Useful for diagnosing what each collector is seeing.
     #[arg(long)]
     diag: bool,
+}
+
+/// `theme::by_name` falls back to `dark` for anything it doesn't recognise,
+/// which is right at runtime but wrong at the CLI: a typo would silently
+/// render the wrong theme and look like the flag did nothing. Reject it here
+/// instead, and list what's actually available.
+fn parse_theme(raw: &str) -> Result<String, String> {
+    let resolved = ui::theme::by_name(raw);
+    if resolved.name == "dark" && !raw.eq_ignore_ascii_case("dark") {
+        return Err(format!(
+            "unknown theme {raw:?} (available: {})",
+            ui::theme::THEME_NAMES.join(", ")
+        ));
+    }
+    Ok(raw.to_string())
 }
 
 fn main() -> Result<()> {
@@ -29,6 +49,8 @@ fn main() -> Result<()> {
     if cli.diag {
         return run_diag();
     }
+    // Before any drawing: every palette read resolves through the active theme.
+    ui::theme::set_by_name(&cli.theme);
     app::run(app::Options { start_tab: cli.tab })
 }
 

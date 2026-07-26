@@ -32,32 +32,32 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 fn draw_empty(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " VOLUMES ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  No managed volumes found.",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "  macOS APFS containers, Linux mdraid arrays, and (later)",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
         Line::from(Span::styled(
             "  ZFS pools / LVM volume groups appear here when present.",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         inner,
     );
 }
@@ -88,23 +88,23 @@ fn draw_filter_row(
     };
     let line = Line::from(vec![
         Span::raw(" "),
-        Span::styled("show", Style::default().fg(p::DIM)),
+        Span::styled("show", Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(
             "all",
             Style::default()
-                .fg(p::BR_WHITE)
+                .fg(p::br_white())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("apfs", Style::default().fg(p::FG)),
+        Span::styled("apfs", Style::default().fg(p::fg())),
         Span::raw("  "),
-        Span::styled("mdraid", Style::default().fg(p::FG)),
+        Span::styled("mdraid", Style::default().fg(p::fg())),
         Span::raw("  "),
-        Span::styled(format!("({})", summary), Style::default().fg(p::DIM)),
+        Span::styled(format!("({})", summary), Style::default().fg(p::dim())),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -117,12 +117,12 @@ fn draw_filter_row(
 fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " VOLUMES ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -135,9 +135,9 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             header.to_string(),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )))
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -149,7 +149,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,
-            Style::default().fg(p::FAINT).bg(p::BG),
+            Style::default().fg(p::faint()).bg(p::bg()),
         ))),
         Rect {
             x: inner.x + 1,
@@ -212,34 +212,34 @@ fn draw_container_row(f: &mut Frame, x: u16, y: u16, w: u16, c: &ApfsContainer) 
     };
     let line = Line::from(vec![
         Span::raw(" "),
-        Span::styled("\u{25cf}", Style::default().fg(p::GREEN)),
+        Span::styled("\u{25cf}", Style::default().fg(p::green())),
         Span::raw(" "),
         Span::styled(
             pad_right(&format!("\u{25be} {} (apfs)", c.bsd), 40),
-            Style::default().fg(p::FG).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::fg()).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(pad_right("apfs ctr", 13), Style::default().fg(p::CYAN)),
+        Span::styled(pad_right("apfs ctr", 13), Style::default().fg(p::cyan())),
         Span::styled(
             pad_left(&fmt_size(c.size_bytes), 9),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
         Span::raw("  "),
         Span::styled(
             pad_left(&format!("{}%", used_pct), 5),
-            Style::default().fg(p::FG),
+            Style::default().fg(p::fg()),
         ),
         Span::raw("  "),
-        Span::styled(pad_right("mounted", 11), Style::default().fg(p::GREEN)),
+        Span::styled(pad_right("mounted", 11), Style::default().fg(p::green())),
         Span::styled(
             c.physical_store
                 .as_deref()
                 .map(|s| format!("on {}", s))
                 .unwrap_or_default(),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x,
             y,
@@ -257,13 +257,13 @@ fn draw_mdraid_row(
     arr: &crate::collect::volumes::MdRaidArray,
 ) {
     let healthy = arr.members_present == arr.members_total && !arr.member_state.contains('_');
-    let dot_color = if !healthy { p::YELLOW } else { p::GREEN };
+    let dot_color = if !healthy { p::yellow() } else { p::green() };
     let state_label = if !healthy {
         "DEGRADED".to_string()
     } else {
         arr.state.clone()
     };
-    let state_color = if !healthy { p::YELLOW } else { p::GREEN };
+    let state_color = if !healthy { p::yellow() } else { p::green() };
 
     let line = Line::from(vec![
         Span::raw(" "),
@@ -271,20 +271,20 @@ fn draw_mdraid_row(
         Span::raw(" "),
         Span::styled(
             pad_right(&format!("\u{25be} /dev/{}", arr.name), 40),
-            Style::default().fg(p::FG).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::fg()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             pad_right(&format!("mdraid {}", arr.level), 13),
-            Style::default().fg(p::CYAN),
+            Style::default().fg(p::cyan()),
         ),
         Span::styled(
             pad_left(&fmt_size(arr.size_bytes), 9),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
         Span::raw("  "),
         Span::styled(
             pad_left(&format!("{}/{}", arr.members_present, arr.members_total), 5),
-            Style::default().fg(p::FG),
+            Style::default().fg(p::fg()),
         ),
         Span::raw("  "),
         Span::styled(
@@ -293,11 +293,11 @@ fn draw_mdraid_row(
         ),
         Span::styled(
             format!("[{}]", arr.member_state),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x,
             y,
@@ -317,18 +317,18 @@ fn draw_member_row(
 ) {
     let glyph = if last { "  \u{2514}" } else { "  \u{251c}" };
     let (flag_text, flag_color) = match m.flag.as_deref() {
-        Some("(F)") => ("failed", p::RED),
-        Some("(S)") => ("spare", p::DIM),
-        Some("(W)") => ("write-mostly", p::YELLOW),
-        Some(other) => (other.trim_matches(|c: char| c == '(' || c == ')'), p::DIM),
-        None => ("in_sync", p::GREEN),
+        Some("(F)") => ("failed", p::red()),
+        Some("(S)") => ("spare", p::dim()),
+        Some("(W)") => ("write-mostly", p::yellow()),
+        Some(other) => (other.trim_matches(|c: char| c == '(' || c == ')'), p::dim()),
+        None => ("in_sync", p::green()),
     };
     let dot_color = if flag_text == "failed" {
-        p::RED
+        p::red()
     } else if flag_text == "write-mostly" {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::GREEN
+        p::green()
     };
     let line = Line::from(vec![
         Span::raw(" "),
@@ -339,18 +339,18 @@ fn draw_member_row(
                 &format!("{} /dev/{}  (idx {})", glyph, m.device, m.index),
                 40,
             ),
-            Style::default().fg(p::FG),
+            Style::default().fg(p::fg()),
         ),
-        Span::styled(pad_right("member", 13), Style::default().fg(p::DIM)),
-        Span::styled(pad_left("—", 9), Style::default().fg(p::DIM)),
+        Span::styled(pad_right("member", 13), Style::default().fg(p::dim())),
+        Span::styled(pad_left("—", 9), Style::default().fg(p::dim())),
         Span::raw("  "),
-        Span::styled(pad_left("—", 5), Style::default().fg(p::DIM)),
+        Span::styled(pad_left("—", 5), Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(pad_right(flag_text, 11), Style::default().fg(flag_color)),
         Span::raw(""),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x,
             y,
@@ -376,17 +376,17 @@ fn draw_progress_row(
         Span::raw("      "),
         Span::styled(
             format!("{} {:.1}%  ", prog.op, prog.percent),
-            Style::default().fg(p::CYAN),
+            Style::default().fg(p::cyan()),
         ),
-        Span::styled(bar, Style::default().fg(p::CYAN)),
+        Span::styled(bar, Style::default().fg(p::cyan())),
         Span::raw("  "),
         Span::styled(
             format!("eta {}  speed {}", prog.eta, prog.speed),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x,
             y,
@@ -404,29 +404,33 @@ fn draw_volume_row(f: &mut Frame, x: u16, y: u16, w: u16, v: &ApfsVolume, last: 
         format!("{}  ({})", v.name, v.bsd)
     };
     let mount = v.mount_point.as_deref().unwrap_or("(not mounted)");
-    let role_col = if v.role.is_empty() { p::DIM } else { p::CYAN };
-    let state = if v.mount_point.is_some() {
-        ("mounted", p::GREEN)
+    let role_col = if v.role.is_empty() {
+        p::dim()
     } else {
-        ("offline", p::DIM)
+        p::cyan()
+    };
+    let state = if v.mount_point.is_some() {
+        ("mounted", p::green())
+    } else {
+        ("offline", p::dim())
     };
     let line = Line::from(vec![
         Span::raw(" "),
         Span::styled(
             "\u{25cf}",
             Style::default().fg(if v.mount_point.is_some() {
-                p::GREEN
+                p::green()
             } else {
-                p::DIM
+                p::dim()
             }),
         ),
         Span::raw(" "),
         Span::styled(
             pad_right(&format!("{} {}", glyph, display_name), 40),
             Style::default().fg(if v.mount_point.is_some() {
-                p::FG
+                p::fg()
             } else {
-                p::DIM
+                p::dim()
             }),
         ),
         Span::styled(
@@ -443,16 +447,16 @@ fn draw_volume_row(f: &mut Frame, x: u16, y: u16, w: u16, v: &ApfsVolume, last: 
         ),
         Span::styled(
             pad_left(&fmt_size(v.consumed_bytes), 9),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
         Span::raw("  "),
-        Span::styled(pad_left("—", 5), Style::default().fg(p::DIM)),
+        Span::styled(pad_left("—", 5), Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(pad_right(state.0, 11), Style::default().fg(state.1)),
-        Span::styled(mount.to_string(), Style::default().fg(p::DIM)),
+        Span::styled(mount.to_string(), Style::default().fg(p::dim())),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x,
             y,

@@ -38,26 +38,26 @@ fn draw_filter_row(f: &mut Frame, area: Rect, fs: &[FsTick]) {
     let removable = fs.iter().filter(|m| m.is_removable).count();
     let line = Line::from(vec![
         Span::raw(" "),
-        Span::styled("show", Style::default().fg(p::DIM)),
+        Span::styled("show", Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(
             format!("mounted {}", mounted),
             Style::default()
-                .fg(p::BR_WHITE)
+                .fg(p::br_white())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(format!("system {}", system), Style::default().fg(p::FG)),
+        Span::styled(format!("system {}", system), Style::default().fg(p::fg())),
         Span::raw("  "),
-        Span::styled(format!("user {}", user), Style::default().fg(p::FG)),
+        Span::styled(format!("user {}", user), Style::default().fg(p::fg())),
         Span::raw("  "),
         Span::styled(
             format!("removable {}", removable),
-            Style::default().fg(p::FG),
+            Style::default().fg(p::fg()),
         ),
     ]);
     f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(p::BG)),
+        Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -70,12 +70,12 @@ fn draw_filter_row(f: &mut Frame, area: Rect, fs: &[FsTick]) {
 fn draw_mounts_table(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " MOUNTS ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -88,9 +88,9 @@ fn draw_mounts_table(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             header.to_string(),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )))
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -103,7 +103,7 @@ fn draw_mounts_table(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             rule,
-            Style::default().fg(p::FAINT).bg(p::BG),
+            Style::default().fg(p::faint()).bg(p::bg()),
         ))),
         Rect {
             x: inner.x + 1,
@@ -137,16 +137,16 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
     };
     let used_col = usage_color(used_pct);
     let dot_col = if m.size_bytes == 0 {
-        p::DIM
+        p::dim()
     } else if used_pct >= 90 {
-        p::RED
+        p::red()
     } else if used_pct >= 80 {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::GREEN
+        p::green()
     };
     let dev_short = m.device.trim_start_matches("/dev/");
-    let row_bg = if selected { p::SEL_BG } else { p::BG };
+    let row_bg = if selected { p::sel_bg() } else { p::bg() };
 
     // First paint the whole row bg so the gaps between sub-paragraphs
     // share the selection color.
@@ -166,14 +166,14 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
         Span::raw(" "),
         Span::styled(
             pad_right(&m.mount, 30),
-            Style::default().fg(if m.size_bytes == 0 { p::DIM } else { p::FG }),
+            Style::default().fg(if m.size_bytes == 0 { p::dim() } else { p::fg() }),
         ),
-        Span::styled(pad_right(dev_short, 18), Style::default().fg(p::DIM)),
-        Span::styled(pad_right(&m.fs_type, 8), Style::default().fg(p::CYAN)),
+        Span::styled(pad_right(dev_short, 18), Style::default().fg(p::dim())),
+        Span::styled(pad_right(&m.fs_type, 8), Style::default().fg(p::cyan())),
         Span::raw(" "),
         Span::styled(
             pad_left(&fmt_size(m.size_bytes), 8),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
         Span::raw(" "),
     ]);
@@ -197,7 +197,7 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
             if i < filled {
                 Span::styled("\u{2588}", Style::default().fg(bar_col).bg(row_bg))
             } else {
-                Span::styled("\u{2584}", Style::default().fg(p::FAINT).bg(row_bg))
+                Span::styled("\u{2584}", Style::default().fg(p::faint()).bg(row_bg))
             }
         })
         .collect();
@@ -227,7 +227,7 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
                     .unwrap_or_else(|| "—".to_string()),
                 5,
             ),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
     ]);
     let tail_x = bar_x + bar_w;
@@ -254,15 +254,15 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let left_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             match sel {
                 Some(m) => format!(" {}  DETAIL ", m.mount),
                 None => " DETAIL ".to_string(),
             },
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = left_block.inner(split[0]);
     f.render_widget(left_block, split[0]);
 
@@ -273,42 +273,46 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             0
         };
         let lines = vec![
-            kv("mount", &m.mount, p::FG),
-            kv("device", m.device.trim_start_matches("/dev/"), p::FG),
-            kv("fs", &m.fs_type, p::CYAN),
-            kv("size", &fmt_size(m.size_bytes), p::FG),
+            kv("mount", &m.mount, p::fg()),
+            kv("device", m.device.trim_start_matches("/dev/"), p::fg()),
+            kv("fs", &m.fs_type, p::cyan()),
+            kv("size", &fmt_size(m.size_bytes), p::fg()),
             kv(
                 "used",
                 &format!("{} ({}%)", fmt_size(m.used_bytes), used_pct),
                 usage_color(used_pct),
             ),
-            kv("free", &fmt_size(m.avail_bytes), p::FG),
-            kv("kind", if m.is_system { "system" } else { "user" }, p::DIM),
+            kv("free", &fmt_size(m.avail_bytes), p::fg()),
+            kv(
+                "kind",
+                if m.is_system { "system" } else { "user" },
+                p::dim(),
+            ),
             kv(
                 "removable",
                 if m.is_removable { "yes" } else { "no" },
-                p::FG,
+                p::fg(),
             ),
             Line::from(""),
             Line::from(Span::styled(
                 " inode usage + 7d growth pending statvfs + history",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )),
         ];
         f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(p::BG)),
+            Paragraph::new(lines).style(Style::default().bg(p::bg())),
             inner,
         );
     }
 
     let right_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " 7d USAGE ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner_r = right_block.inner(split[1]);
     f.render_widget(right_block, split[1]);
     f.render_widget(
@@ -316,17 +320,17 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 "  awaiting snapshot history",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )),
         ])
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         inner_r,
     );
 }
 
 fn kv(key: &str, val: &str, val_color: ratatui::style::Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!(" {:<12}", key), Style::default().fg(p::DIM)),
+        Span::styled(format!(" {:<12}", key), Style::default().fg(p::dim())),
         Span::styled(val.to_string(), Style::default().fg(val_color)),
     ])
 }

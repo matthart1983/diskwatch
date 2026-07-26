@@ -57,12 +57,12 @@ fn draw_tiles(f: &mut Frame, area: Rect, app: &App) {
 fn tile_block(title: &'static str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             format!(" {} ", title),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ))
-        .style(Style::default().bg(p::BG))
+        .style(Style::default().bg(p::bg()))
 }
 
 fn render_tile(
@@ -84,16 +84,16 @@ fn render_tile(
         Span::styled(
             value.to_string(),
             Style::default()
-                .fg(p::BR_WHITE)
+                .fg(p::br_white())
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
     let line2 = Line::from(Span::styled(
         format!("  {}", sub),
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     ));
     f.render_widget(
-        Paragraph::new(vec![line1, line2]).style(Style::default().bg(p::BG)),
+        Paragraph::new(vec![line1, line2]).style(Style::default().bg(p::bg())),
         inner,
     );
 }
@@ -107,11 +107,11 @@ fn draw_capacity_tile(f: &mut Frame, area: Rect, app: &App) {
         0
     };
     let color = if pct >= 90 {
-        p::RED
+        p::red()
     } else if pct >= 80 {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::GREEN
+        p::green()
     };
     render_tile(
         f,
@@ -127,11 +127,11 @@ fn draw_io_tile(f: &mut Frame, area: Rect, app: &App) {
     let (rate, _) = crate::collect::io::aggregate(&app.io.latest);
     let active = app.io.latest.iter().filter(|t| t.bps > 1_000.0).count();
     let color = if rate > 50_000_000.0 {
-        p::YELLOW
+        p::yellow()
     } else if rate > 1_000.0 {
-        p::GREEN
+        p::green()
     } else {
-        p::DIM
+        p::dim()
     };
     render_tile(
         f,
@@ -147,15 +147,15 @@ fn draw_latency_tile(f: &mut Frame, area: Rect, app: &App) {
     match crate::collect::io::worst_p99_us(&app.io.latest) {
         Some(us) => {
             let (value, color) = if us >= 10_000.0 {
-                (format!("{:.1}ms", us / 1_000.0), p::RED)
+                (format!("{:.1}ms", us / 1_000.0), p::red())
             } else if us >= 2_000.0 {
-                (format!("{:.1}ms", us / 1_000.0), p::YELLOW)
+                (format!("{:.1}ms", us / 1_000.0), p::yellow())
             } else if us >= 1_000.0 {
-                (format!("{:.1}ms", us / 1_000.0), p::GREEN)
+                (format!("{:.1}ms", us / 1_000.0), p::green())
             } else if us > 0.0 {
-                (format!("{:.0}µs", us), p::GREEN)
+                (format!("{:.0}µs", us), p::green())
             } else {
-                ("—".to_string(), p::DIM)
+                ("—".to_string(), p::dim())
             };
             render_tile(
                 f,
@@ -167,7 +167,7 @@ fn draw_latency_tile(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         None => {
-            render_tile(f, area, "p99 LATENCY", p::DIM, "—", "no IO observed yet");
+            render_tile(f, area, "p99 LATENCY", p::dim(), "—", "no IO observed yet");
         }
     }
 }
@@ -186,11 +186,11 @@ fn draw_health_tile(f: &mut Frame, area: Rect, app: &App) {
         .count();
     let unknown = total.saturating_sub(healthy).saturating_sub(failing);
     let color = if failing > 0 {
-        p::RED
+        p::red()
     } else if unknown > 0 {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::GREEN
+        p::green()
     };
     render_tile(
         f,
@@ -215,11 +215,11 @@ fn draw_insights_tile(f: &mut Frame, area: Rect, app: &App) {
         .count();
     let total = app.insights.len();
     let color = if crit > 0 {
-        p::RED
+        p::red()
     } else if warn > 0 {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::CYAN
+        p::cyan()
     };
     render_tile(
         f,
@@ -255,56 +255,56 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
     // Pinned prefix (dot + DEVICE + MODEL) is always shown.
     let mut header_spans: Vec<Span> = vec![
         Span::raw("   "),
-        Span::styled(pad_right("DEVICE", 11), Style::default().fg(p::DIM)),
-        Span::styled(pad_right("MODEL", 30), Style::default().fg(p::DIM)),
+        Span::styled(pad_right("DEVICE", 11), Style::default().fg(p::dim())),
+        Span::styled(pad_right("MODEL", 30), Style::default().fg(p::dim())),
     ];
     if show_size {
         header_spans.push(Span::styled(
             pad_left("SIZE", 8),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
         header_spans.push(Span::raw("  "));
     }
     if show_free {
         header_spans.push(Span::styled(
             pad_left("FREE", 8),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
         header_spans.push(Span::raw("  "));
     }
     if show_used {
         header_spans.push(Span::styled(
             pad_left("USED", 4),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
         header_spans.push(Span::raw("  "));
     }
     if show_temp {
         header_spans.push(Span::styled(
             pad_left("TEMP", 6),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
         header_spans.push(Span::raw("  "));
     }
     if show_smart {
-        header_spans.push(Span::styled("SMART", Style::default().fg(p::DIM)));
+        header_spans.push(Span::styled("SMART", Style::default().fg(p::dim())));
     }
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             format!(" DEVICES  {} attached ", app.devices.len()),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 {
         return;
     }
     f.render_widget(
-        Paragraph::new(Line::from(header_spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(header_spans)).style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -321,22 +321,22 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
             0
         };
         let used_col = if used_pct >= 90 {
-            p::RED
+            p::red()
         } else if used_pct >= 80 {
-            p::YELLOW
+            p::yellow()
         } else {
-            p::FG
+            p::fg()
         };
         let free_bytes = d.size_bytes.saturating_sub(d.used_bytes);
         let (smart_text, smart_col) = match d.smart_ok {
-            Some(true) => ("ok", p::GREEN),
-            Some(false) => ("FAIL", p::RED),
-            None => ("—", p::DIM),
+            Some(true) => ("ok", p::green()),
+            Some(false) => ("FAIL", p::red()),
+            None => ("—", p::dim()),
         };
         let dot_col = match d.smart_ok {
-            Some(true) => p::GREEN,
-            Some(false) => p::RED,
-            None => p::DIM,
+            Some(true) => p::green(),
+            Some(false) => p::red(),
+            None => p::dim(),
         };
         // Temperature from the SMART collector (cached, polled per
         // configured interval). Color-coded so a hot drive pops out
@@ -344,31 +344,31 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
         // display unit configured in app.temp_unit.
         let (temp_text, temp_col) = match app.smart.by_device.get(&d.name) {
             Some(tick) => match tick.temperature_c {
-                Some(t) if t >= 70 => (app.temp_unit.format_temp(t), p::RED),
-                Some(t) if t >= 55 => (app.temp_unit.format_temp(t), p::YELLOW),
-                Some(t) => (app.temp_unit.format_temp(t), p::FG),
-                None => ("—".to_string(), p::DIM),
+                Some(t) if t >= 70 => (app.temp_unit.format_temp(t), p::red()),
+                Some(t) if t >= 55 => (app.temp_unit.format_temp(t), p::yellow()),
+                Some(t) => (app.temp_unit.format_temp(t), p::fg()),
+                None => ("—".to_string(), p::dim()),
             },
-            None => ("—".to_string(), p::DIM),
+            None => ("—".to_string(), p::dim()),
         };
         let mut line_spans: Vec<Span> = vec![
             Span::raw(" "),
             Span::styled("\u{25cf}", Style::default().fg(dot_col)),
             Span::raw(" "),
-            Span::styled(pad_right(&d.name, 11), Style::default().fg(p::FG)),
-            Span::styled(pad_right(&d.model, 30), Style::default().fg(p::FG)),
+            Span::styled(pad_right(&d.name, 11), Style::default().fg(p::fg())),
+            Span::styled(pad_right(&d.model, 30), Style::default().fg(p::fg())),
         ];
         if show_size {
             line_spans.push(Span::styled(
                 pad_left(&fmt_size(d.size_bytes), 8),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ));
             line_spans.push(Span::raw("  "));
         }
         if show_free {
             line_spans.push(Span::styled(
                 pad_left(&fmt_size(free_bytes), 8),
-                Style::default().fg(p::CYAN),
+                Style::default().fg(p::cyan()),
             ));
             line_spans.push(Span::raw("  "));
         }
@@ -393,7 +393,7 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
             ));
         }
         f.render_widget(
-            Paragraph::new(Line::from(line_spans)).style(Style::default().bg(p::BG)),
+            Paragraph::new(Line::from(line_spans)).style(Style::default().bg(p::bg())),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 1 + i as u16,
@@ -407,12 +407,12 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
 fn draw_io_sparkline(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " AGG IO  60s ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 3 {
@@ -423,13 +423,13 @@ fn draw_io_sparkline(f: &mut Frame, area: Rect, app: &App) {
         Span::raw(" "),
         Span::styled(
             fmt_rate(agg),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("all devices", Style::default().fg(p::DIM)),
+        Span::styled("all devices", Style::default().fg(p::dim())),
     ]);
     f.render_widget(
-        Paragraph::new(summary).style(Style::default().bg(p::BG)),
+        Paragraph::new(summary).style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -443,7 +443,7 @@ fn draw_io_sparkline(f: &mut Frame, area: Rect, app: &App) {
     // have data (rather than upsampling or padding zeros).
     let buckets = aggregate_history(app);
     f.render_widget(
-        BaselineSparkline::new(&buckets).style(Style::default().fg(p::CYAN).bg(p::BG)),
+        BaselineSparkline::new(&buckets).style(Style::default().fg(p::cyan()).bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -484,21 +484,23 @@ fn draw_bottom_strip(f: &mut Frame, area: Rect, app: &App) {
 fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " INSIGHTS ",
-            Style::default().fg(p::YELLOW).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(p::yellow())
+                .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let visible = (inner.height as usize).min(app.insights.len()).min(3);
     for i in 0..visible {
         let ins = &app.insights[i];
         let (badge_fg, badge_bg) = match ins.sev {
-            Severity::Crit => (p::RED, p::ERR_BG),
-            Severity::Warn => (p::YELLOW, p::WARN_BG),
-            Severity::Info => (p::CYAN, p::OK_BG),
+            Severity::Crit => (p::red(), p::err_bg()),
+            Severity::Warn => (p::yellow(), p::warn_bg()),
+            Severity::Info => (p::cyan(), p::ok_bg()),
         };
         let line = Line::from(vec![
             Span::raw(" "),
@@ -510,10 +512,10 @@ fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(ins.title.clone(), Style::default().fg(p::FG)),
+            Span::styled(ins.title.clone(), Style::default().fg(p::fg())),
         ]);
         f.render_widget(
-            Paragraph::new(line).style(Style::default().bg(p::BG)),
+            Paragraph::new(line).style(Style::default().bg(p::bg())),
             Rect {
                 x: inner.x,
                 y: inner.y + i as u16,
@@ -526,9 +528,9 @@ fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  no insights yet",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )))
-            .style(Style::default().bg(p::BG)),
+            .style(Style::default().bg(p::bg())),
             inner,
         );
     }
@@ -537,12 +539,12 @@ fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
 fn draw_hot_files_note(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " HOT FILES ",
-            Style::default().fg(p::DIM).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::dim()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
@@ -550,14 +552,14 @@ fn draw_hot_files_note(f: &mut Frame, area: Rect) {
             Line::from(""),
             Line::from(Span::styled(
                 "  per-process write rate deferred",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )),
             Line::from(Span::styled(
                 "  see [7] for what's needed",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )),
         ])
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         inner,
     );
 }
@@ -570,16 +572,16 @@ fn draw_capacity_bar(f: &mut Frame, area: Rect, app: &App) {
     let free = total.saturating_sub(used_sum);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             format!(
                 " CAPACITY  {} used / {} ",
                 fmt_size(used_sum),
                 fmt_size(total)
             ),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 || inner.width < 10 || total == 0 {
@@ -599,23 +601,26 @@ fn draw_capacity_bar(f: &mut Frame, area: Rect, app: &App) {
         let seg_w = ((d.used_bytes as f64 / total as f64) * bar_w as f64).round() as usize;
         let seg_w = seg_w.max(1).min(bar_w - consumed_cells);
         let color = if d.is_removable {
-            p::MAGENTA
+            p::magenta()
         } else if matches!(d.kind, crate::collect::DeviceKind::Nvme) {
-            p::CYAN
+            p::cyan()
         } else {
-            p::GREEN
+            p::green()
         };
         let block: String = "\u{2588}".repeat(seg_w);
-        spans.push(Span::styled(block, Style::default().fg(color).bg(p::BG)));
+        spans.push(Span::styled(block, Style::default().fg(color).bg(p::bg())));
         consumed_cells += seg_w;
     }
     if consumed_cells < bar_w {
         let free_w = bar_w - consumed_cells;
         let block: String = "\u{2591}".repeat(free_w);
-        spans.push(Span::styled(block, Style::default().fg(p::FAINT).bg(p::BG)));
+        spans.push(Span::styled(
+            block,
+            Style::default().fg(p::faint()).bg(p::bg()),
+        ));
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x,
             y: inner.y,
@@ -628,28 +633,28 @@ fn draw_capacity_bar(f: &mut Frame, area: Rect, app: &App) {
     let mut legend: Vec<Span> = Vec::new();
     for d in &app.devices {
         let color = if d.is_removable {
-            p::MAGENTA
+            p::magenta()
         } else if matches!(d.kind, crate::collect::DeviceKind::Nvme) {
-            p::CYAN
+            p::cyan()
         } else {
-            p::GREEN
+            p::green()
         };
         legend.push(Span::raw("  "));
         legend.push(Span::styled("\u{25fc} ", Style::default().fg(color)));
         legend.push(Span::styled(
             format!("{} used {}", d.name, fmt_size(d.used_bytes)),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
     }
     legend.push(Span::raw("  "));
-    legend.push(Span::styled("\u{25fc} ", Style::default().fg(p::FAINT)));
+    legend.push(Span::styled("\u{25fc} ", Style::default().fg(p::faint())));
     legend.push(Span::styled(
         format!("free {}", fmt_size(free)),
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     ));
     if inner.height >= 2 {
         f.render_widget(
-            Paragraph::new(Line::from(legend)).style(Style::default().bg(p::BG)),
+            Paragraph::new(Line::from(legend)).style(Style::default().bg(p::bg())),
             Rect {
                 x: inner.x,
                 y: inner.y + 1,

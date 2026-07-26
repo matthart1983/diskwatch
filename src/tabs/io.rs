@@ -34,12 +34,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 fn draw_empty(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             " IO ",
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
@@ -47,10 +47,10 @@ fn draw_empty(f: &mut Frame, area: Rect) {
             Line::from(""),
             Line::from(Span::styled(
                 "  No IO data yet — sampling begins on the first tick.",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )),
         ])
-        .style(Style::default().bg(p::BG)),
+        .style(Style::default().bg(p::bg())),
         inner,
     );
 }
@@ -61,31 +61,31 @@ fn draw_summary_line(f: &mut Frame, area: Rect, app: &App) {
     let read = agg - write;
     let mut spans = vec![
         Span::raw(" "),
-        Span::styled("aggregate", Style::default().fg(p::DIM)),
+        Span::styled("aggregate", Style::default().fg(p::dim())),
         Span::raw("  "),
         Span::styled(
             fmt_rate(agg),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ),
     ];
     if any_split {
         spans.push(Span::raw("   "));
-        spans.push(Span::styled("read ", Style::default().fg(p::DIM)));
+        spans.push(Span::styled("read ", Style::default().fg(p::dim())));
         spans.push(Span::styled(
             fmt_rate(read),
-            Style::default().fg(p::GREEN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::green()).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw("   "));
-        spans.push(Span::styled("write ", Style::default().fg(p::DIM)));
+        spans.push(Span::styled("write ", Style::default().fg(p::dim())));
         spans.push(Span::styled(
             fmt_rate(write),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ));
     } else {
         spans.push(Span::raw("   "));
         spans.push(Span::styled(
             "(read+write combined; split pending IOKit Statistics)",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
     }
     spans.push(Span::raw("   "));
@@ -95,10 +95,10 @@ fn draw_summary_line(f: &mut Frame, area: Rect, app: &App) {
             app.io.latest.len(),
             if app.io.latest.len() == 1 { "" } else { "s" }
         ),
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     ));
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -162,18 +162,18 @@ fn latency_line(tick: &IoTick) -> Line<'static> {
     let Some(pct) = tick.latency_pct else {
         return Line::from(Span::styled(
             "lat   no samples yet",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ));
     };
     let color = |us: f64| {
         if us >= 10_000.0 {
-            p::RED
+            p::red()
         } else if us >= 2_000.0 {
-            p::YELLOW
+            p::yellow()
         } else if us > 0.0 {
-            p::FG
+            p::fg()
         } else {
-            p::DIM
+            p::dim()
         }
     };
     let lbl = |us: f64| {
@@ -186,12 +186,12 @@ fn latency_line(tick: &IoTick) -> Line<'static> {
         }
     };
     Line::from(vec![
-        Span::styled("lat ", Style::default().fg(p::DIM)),
-        Span::styled("r ", Style::default().fg(p::DIM)),
-        Span::styled("p50 ", Style::default().fg(p::DIM)),
+        Span::styled("lat ", Style::default().fg(p::dim())),
+        Span::styled("r ", Style::default().fg(p::dim())),
+        Span::styled("p50 ", Style::default().fg(p::dim())),
         Span::styled(lbl(pct.p50_r), Style::default().fg(color(pct.p50_r))),
         Span::raw(" "),
-        Span::styled("p99 ", Style::default().fg(p::DIM)),
+        Span::styled("p99 ", Style::default().fg(p::dim())),
         Span::styled(
             lbl(pct.p99_r),
             Style::default()
@@ -199,11 +199,11 @@ fn latency_line(tick: &IoTick) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
-        Span::styled("w ", Style::default().fg(p::DIM)),
-        Span::styled("p50 ", Style::default().fg(p::DIM)),
+        Span::styled("w ", Style::default().fg(p::dim())),
+        Span::styled("p50 ", Style::default().fg(p::dim())),
         Span::styled(lbl(pct.p50_w), Style::default().fg(color(pct.p50_w))),
         Span::raw(" "),
-        Span::styled("p99 ", Style::default().fg(p::DIM)),
+        Span::styled("p99 ", Style::default().fg(p::dim())),
         Span::styled(
             lbl(pct.p99_w),
             Style::default()
@@ -216,12 +216,12 @@ fn latency_line(tick: &IoTick) -> Line<'static> {
 fn draw_panel(f: &mut Frame, area: Rect, tick: &IoTick, history: Option<&DeviceHistory>) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(p::FAINT).bg(p::BG))
+        .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
             format!(" {} ", tick.device),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(p::BG));
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -232,27 +232,27 @@ fn draw_panel(f: &mut Frame, area: Rect, tick: &IoTick, history: Option<&DeviceH
     // Top line: per-direction rates.
     let mut rate_spans: Vec<Span> = Vec::new();
     if let Some((r, w)) = tick.split {
-        rate_spans.push(Span::styled("read ", Style::default().fg(p::DIM)));
+        rate_spans.push(Span::styled("read ", Style::default().fg(p::dim())));
         rate_spans.push(Span::styled(
             fmt_rate(r),
-            Style::default().fg(p::GREEN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::green()).add_modifier(Modifier::BOLD),
         ));
         rate_spans.push(Span::raw("   "));
-        rate_spans.push(Span::styled("write ", Style::default().fg(p::DIM)));
+        rate_spans.push(Span::styled("write ", Style::default().fg(p::dim())));
         rate_spans.push(Span::styled(
             fmt_rate(w),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ));
     } else {
-        rate_spans.push(Span::styled("rate ", Style::default().fg(p::DIM)));
+        rate_spans.push(Span::styled("rate ", Style::default().fg(p::dim())));
         rate_spans.push(Span::styled(
             fmt_rate(tick.bps),
-            Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ));
     }
     let summary = Line::from(rate_spans);
     f.render_widget(
-        Paragraph::new(summary).style(Style::default().bg(p::BG)),
+        Paragraph::new(summary).style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -264,7 +264,7 @@ fn draw_panel(f: &mut Frame, area: Rect, tick: &IoTick, history: Option<&DeviceH
     // Second line: latency percentiles.
     let lat_line = latency_line(tick);
     f.render_widget(
-        Paragraph::new(lat_line).style(Style::default().bg(p::BG)),
+        Paragraph::new(lat_line).style(Style::default().bg(p::bg())),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
@@ -279,7 +279,7 @@ fn draw_panel(f: &mut Frame, area: Rect, tick: &IoTick, history: Option<&DeviceH
         let panel_inner_h = inner.height.saturating_sub(3);
         let data: Vec<f64> = h.combined.iter().copied().collect();
         f.render_widget(
-            BaselineSparkline::new(&data).style(Style::default().fg(p::CYAN).bg(p::BG)),
+            BaselineSparkline::new(&data).style(Style::default().fg(p::cyan()).bg(p::bg())),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 2,
@@ -294,10 +294,10 @@ fn draw_panel(f: &mut Frame, area: Rect, tick: &IoTick, history: Option<&DeviceH
     if inner.height >= 6 {
         let lat = Line::from(vec![Span::styled(
             "  p50/p99 of per-tick averages — micro-spikes invisible without eBPF/IOReport",
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         )]);
         f.render_widget(
-            Paragraph::new(lat).style(Style::default().bg(p::BG)),
+            Paragraph::new(lat).style(Style::default().bg(p::bg())),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + inner.height - 1,

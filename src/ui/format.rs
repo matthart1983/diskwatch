@@ -63,21 +63,21 @@ pub fn pad_left(s: &str, n: usize) -> String {
 /// `green < 80, yellow 80-89, red >= 90` — matches JSX usage-bar thresholds.
 pub fn usage_color(used_pct: u32) -> Color {
     if used_pct >= 90 {
-        p::RED
+        p::red()
     } else if used_pct >= 80 {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::FG
+        p::fg()
     }
 }
 
 /// Same thresholds, but returns the bar fill color (green when ok).
 pub fn usage_bar_color(used_pct: u32) -> Color {
     if used_pct >= 90 {
-        p::RED
+        p::red()
     } else if used_pct >= 80 {
-        p::YELLOW
+        p::yellow()
     } else {
-        p::GREEN
+        p::green()
     }
 }

@@ -12,38 +12,41 @@ use crate::ui::palette as p;
 
 pub fn draw_header(f: &mut Frame, area: Rect, host: &HostInfo, live: LiveState) {
     let mut left: Vec<Span> = Vec::new();
-    left.push(Span::styled(" \u{25cf}", Style::default().fg(p::GREEN)));
+    left.push(Span::styled(" \u{25cf}", Style::default().fg(p::green())));
     left.push(Span::styled(
         " DiskWatch",
-        Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+        Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
     ));
     left.push(Span::styled(
         format!(" v{}", env!("CARGO_PKG_VERSION")),
-        Style::default().fg(p::DIM),
+        Style::default().fg(p::dim()),
     ));
-    left.push(Span::styled("  \u{2502}  ", Style::default().fg(p::FAINT)));
-    left.push(Span::styled("host ", Style::default().fg(p::DIM)));
+    left.push(Span::styled(
+        "  \u{2502}  ",
+        Style::default().fg(p::faint()),
+    ));
+    left.push(Span::styled("host ", Style::default().fg(p::dim())));
     left.push(Span::styled(
         host.hostname.clone(),
-        Style::default().fg(p::FG),
+        Style::default().fg(p::fg()),
     ));
-    left.push(Span::styled("  ", Style::default().fg(p::DIM)));
-    left.push(Span::styled(host.os.clone(), Style::default().fg(p::FG)));
-    left.push(Span::styled("  up ", Style::default().fg(p::DIM)));
+    left.push(Span::styled("  ", Style::default().fg(p::dim())));
+    left.push(Span::styled(host.os.clone(), Style::default().fg(p::fg())));
+    left.push(Span::styled("  up ", Style::default().fg(p::dim())));
     left.push(Span::styled(
         format_uptime(host.uptime_secs),
-        Style::default().fg(p::FG),
+        Style::default().fg(p::fg()),
     ));
-    left.push(Span::styled("  ", Style::default().fg(p::DIM)));
+    left.push(Span::styled("  ", Style::default().fg(p::dim())));
     left.push(Span::styled(
         format!("{} devs", host.device_count),
-        Style::default().fg(p::FG),
+        Style::default().fg(p::fg()),
     ));
-    left.push(Span::styled(" attached", Style::default().fg(p::DIM)));
+    left.push(Span::styled(" attached", Style::default().fg(p::dim())));
 
     let (label, color) = match live {
-        LiveState::Live => ("LIVE", p::GREEN),
-        LiveState::Paused => ("PAUSE", p::YELLOW),
+        LiveState::Live => ("LIVE", p::green()),
+        LiveState::Paused => ("PAUSE", p::yellow()),
     };
     let ts = Local::now().format("%H:%M:%S").to_string();
     let right_text = format!("\u{25cf} {}  {}", label, ts);
@@ -67,11 +70,11 @@ pub fn draw_header(f: &mut Frame, area: Rect, host: &HostInfo, live: LiveState) 
     };
 
     f.render_widget(
-        Paragraph::new(Line::from(left)).style(Style::default().bg(p::BG).fg(p::FG)),
+        Paragraph::new(Line::from(left)).style(Style::default().bg(p::bg()).fg(p::fg())),
         left_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(right)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(right)).style(Style::default().bg(p::bg())),
         right_area,
     );
 }
@@ -95,31 +98,31 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
         let cell_w = label.chars().count() + 2;
 
         if *tab == active {
-            spans.push(Span::styled(" ", Style::default().bg(p::BG)));
+            spans.push(Span::styled(" ", Style::default().bg(p::bg())));
             spans.push(Span::styled(
                 label.clone(),
                 Style::default()
-                    .fg(p::CYAN)
-                    .bg(p::BG)
+                    .fg(p::cyan())
+                    .bg(p::bg())
                     .add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled(" ", Style::default().bg(p::BG)));
+            spans.push(Span::styled(" ", Style::default().bg(p::bg())));
             active_start = Some(col);
             active_end = Some(col + cell_w);
         } else {
-            spans.push(Span::styled(" ", Style::default().fg(p::DIM)));
+            spans.push(Span::styled(" ", Style::default().fg(p::dim())));
             spans.push(Span::styled(
                 format!("[{}] ", tab.number()),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ));
             spans.push(Span::styled(
                 tab.label().to_string(),
-                Style::default().fg(p::FG),
+                Style::default().fg(p::fg()),
             ));
             if !badge.is_empty() {
-                spans.push(Span::styled(badge, Style::default().fg(p::DIM)));
+                spans.push(Span::styled(badge, Style::default().fg(p::dim())));
             }
-            spans.push(Span::styled(" ", Style::default().fg(p::DIM)));
+            spans.push(Span::styled(" ", Style::default().fg(p::dim())));
         }
 
         col += cell_w;
@@ -158,13 +161,13 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
         height: 1,
     };
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         labels_area,
     );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             underline,
-            Style::default().fg(p::FAINT).bg(p::BG),
+            Style::default().fg(p::faint()).bg(p::bg()),
         ))),
         underline_area,
     );
@@ -178,9 +181,9 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
     // per-tab picker (Devices, SMART, FS, Overview) on first launch.
     spans.push(Span::styled(
         "\u{2191}\u{2193}\u{2190}\u{2192}".to_string(),
-        Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+        Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(":Nav ", Style::default().fg(p::DIM)));
+    spans.push(Span::styled(":Nav ", Style::default().fg(p::dim())));
 
     // Only bindings that are actually handled in `handle_key` are shown —
     // diskwatch has no Snapshot/Diff/Profile/Rec/Filter features (those were
@@ -194,7 +197,7 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
     ];
     for (gi, g) in groups.iter().enumerate() {
         if gi > 0 {
-            spans.push(Span::styled(" \u{2502} ", Style::default().fg(p::FAINT)));
+            spans.push(Span::styled(" \u{2502} ", Style::default().fg(p::faint())));
         }
         for (k, label) in g.iter() {
             let key_str = if *k == '1' {
@@ -204,24 +207,26 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
             };
             spans.push(Span::styled(
                 key_str,
-                Style::default().fg(p::CYAN).add_modifier(Modifier::BOLD),
+                Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 format!(":{} ", label),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ));
         }
     }
     if !extra.is_empty() {
-        spans.push(Span::styled(" \u{2502} ", Style::default().fg(p::FAINT)));
+        spans.push(Span::styled(" \u{2502} ", Style::default().fg(p::faint())));
         for (k, label) in extra.iter() {
             spans.push(Span::styled(
                 k.to_string(),
-                Style::default().fg(p::YELLOW).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(p::yellow())
+                    .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 format!(":{} ", label),
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             ));
         }
     }
@@ -242,12 +247,12 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             divider,
-            Style::default().fg(p::FAINT).bg(p::BG),
+            Style::default().fg(p::faint()).bg(p::bg()),
         ))),
         divider_area,
     );
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         text_area,
     );
 }

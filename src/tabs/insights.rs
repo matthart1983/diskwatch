@@ -32,25 +32,25 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(
             "\u{25cf} ",
             Style::default().fg(if crit > 0 {
-                p::RED
+                p::red()
             } else if warn > 0 {
-                p::YELLOW
+                p::yellow()
             } else {
-                p::CYAN
+                p::cyan()
             }),
         ),
         Span::styled(
             format!("{} active", app.insights.len()),
-            Style::default().fg(p::FG).add_modifier(Modifier::BOLD),
+            Style::default().fg(p::fg()).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             format!("{} crit  {} warn  {} info", crit, warn, info),
-            Style::default().fg(p::DIM),
+            Style::default().fg(p::dim()),
         ),
     ]);
     f.render_widget(
-        Paragraph::new(header_line).style(Style::default().bg(p::BG)),
+        Paragraph::new(header_line).style(Style::default().bg(p::bg())),
         Rect {
             x: area.x,
             y: area.y,
@@ -83,9 +83,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  Insights are read-only suggestions   they never modify devices, volumes, or filesystems.",
-                Style::default().fg(p::DIM),
+                Style::default().fg(p::dim()),
             )))
-            .style(Style::default().bg(p::BG)),
+            .style(Style::default().bg(p::bg())),
             Rect {
                 x: area.x,
                 y,
@@ -98,14 +98,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_card(f: &mut Frame, area: Rect, ins: &Insight) {
     let (sev_color, sev_bg) = match ins.sev {
-        Severity::Crit => (p::RED, p::ERR_BG),
-        Severity::Warn => (p::YELLOW, p::WARN_BG),
-        Severity::Info => (p::CYAN, p::OK_BG),
+        Severity::Crit => (p::red(), p::err_bg()),
+        Severity::Warn => (p::yellow(), p::warn_bg()),
+        Severity::Info => (p::cyan(), p::ok_bg()),
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(sev_color).bg(p::BG))
-        .style(Style::default().bg(p::BG));
+        .border_style(Style::default().fg(sev_color).bg(p::bg()))
+        .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -123,14 +123,14 @@ fn draw_card(f: &mut Frame, area: Rect, ins: &Insight) {
         Span::styled(
             ins.title.clone(),
             Style::default()
-                .fg(p::BR_WHITE)
+                .fg(p::br_white())
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
     lines.push(header);
 
     for (i, b) in ins.body.iter().enumerate().take(3) {
-        let color = if i == 0 { p::FG } else { p::DIM };
+        let color = if i == 0 { p::fg() } else { p::dim() };
         lines.push(Line::from(Span::styled(
             format!(" {}", b),
             Style::default().fg(color),
@@ -139,11 +139,11 @@ fn draw_card(f: &mut Frame, area: Rect, ins: &Insight) {
     if !ins.suggested_tab.is_empty() {
         lines.push(Line::from(Span::styled(
             format!(" \u{2192} open [{}] tab", ins.suggested_tab),
-            Style::default().fg(p::CYAN),
+            Style::default().fg(p::cyan()),
         )));
     }
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(p::BG)),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         inner,
     );
 }
