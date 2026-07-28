@@ -14,8 +14,8 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::insights::Severity;
 use crate::ui::format::{fmt_rate, fmt_size, pad_left, pad_right};
+use crate::ui::graph;
 use crate::ui::palette as p;
-use crate::ui::sparkline::BaselineSparkline;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
@@ -438,18 +438,22 @@ fn draw_io_sparkline(f: &mut Frame, area: Rect, app: &App) {
         },
     );
 
-    // Aggregate sparkline across all devices. One cell per sample,
-    // with a `▁` baseline filling any leading cells that don't yet
-    // have data (rather than upsampling or padding zeros).
+    // Aggregate chart across all devices. One cell per sample, with a
+    // baseline filling any leading cells that don't yet have data
+    // (rather than upsampling or padding zeros). Routed through the
+    // graph module so it follows the app-wide bars/dots setting.
     let buckets = aggregate_history(app);
-    f.render_widget(
-        BaselineSparkline::new(&buckets).style(Style::default().fg(p::cyan()).bg(p::bg())),
+    graph::render(
+        f.buffer_mut(),
         Rect {
             x: inner.x + 1,
             y: inner.y + 1,
             width: inner.width.saturating_sub(2),
             height: inner.height.saturating_sub(1),
         },
+        &buckets,
+        p::cyan(),
+        graph::opts(),
     );
 }
 

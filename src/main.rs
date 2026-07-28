@@ -23,6 +23,24 @@ struct Cli {
     #[arg(long, default_value = "dark", value_parser = parse_theme)]
     theme: String,
 
+    /// Chart style: "bars" (default) or "dots" for btop-style braille,
+    /// which resolves four levels per row instead of one. Also accepts
+    /// "braille" and "btop".
+    #[arg(long, default_value = "bars", value_parser = parse_graph)]
+    graph: String,
+
+    /// btop's gradient: charts fade from bright at `now` to dim at the
+    /// left edge, over a faint dot grid. Off by default; ignored under
+    /// `--theme terminal`, which pins no RGB.
+    #[arg(long)]
+    graph_fade: bool,
+
+    /// Start in Lite: one 80×24 screen, six keys — read and write
+    /// throughput, capacity with a time-to-full projection, and the
+    /// busiest files. Toggle either way at runtime with `L`.
+    #[arg(long)]
+    lite: bool,
+
     /// Print collected state and exit without launching the TUI.
     /// Useful for diagnosing what each collector is seeing.
     #[arg(long)]
@@ -44,14 +62,34 @@ fn parse_theme(raw: &str) -> Result<String, String> {
     Ok(raw.to_string())
 }
 
+/// Same reasoning as [`parse_theme`]: `graph::by_name` falls back to
+/// `bars` for anything it doesn't recognise, which is right at runtime
+/// but wrong at the CLI — a typo would silently render the default and
+/// look like the flag did nothing.
+fn parse_graph(raw: &str) -> Result<String, String> {
+    if ui::graph::by_name(raw) == ui::graph::GraphStyle::Bars && !raw.eq_ignore_ascii_case("bars") {
+        return Err(format!(
+            "unknown graph style {raw:?} (available: {})",
+            ui::graph::GRAPH_STYLE_NAMES.join(", ")
+        ));
+    }
+    Ok(raw.to_string())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.diag {
         return run_diag();
     }
-    // Before any drawing: every palette read resolves through the active theme.
+    // Before any drawing: every palette read resolves through the active
+    // theme, and every chart through the active graph style.
     ui::theme::set_by_name(&cli.theme);
-    app::run(app::Options { start_tab: cli.tab })
+    ui::graph::set_by_name(&cli.graph);
+    ui::graph::set_fade(cli.graph_fade);
+    app::run(app::Options {
+        start_tab: cli.tab,
+        lite: cli.lite,
+    })
 }
 
 fn run_diag() -> Result<()> {

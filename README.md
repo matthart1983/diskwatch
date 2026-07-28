@@ -37,6 +37,39 @@
 
 Where `lsblk` shows you *which disks exist*, DiskWatch shows you *what's happening on them* — capacity trending, IO throughput, p99 latency, SMART health, and the files being written *right now* — and tells you why in plain English when something's anomalous.
 
+## Lite
+
+```bash
+diskwatch --lite
+```
+
+One screen at 80×24, six keys, no tabs. Read and write throughput, a capacity line that
+answers *how long have I got* rather than *how full am I*, and the busiest files — sized to
+run in a tmux split or an SSH session to a NAS.
+
+```
+diskwatch  nas-01 · 4 devices                              ● 2.6 / 3.8 TB
+
+r 128 MB/s read                              peak 412 MB/s  avg 96 MB/s
+▁▂▃▅█▇▅▃▂▁▁▂▄▆█▇▄▂▁▁▁▂▃▅▇█▆▄▂▁▁▁▂▃▄▆█▇▅▃▂▁▁▂▃▅▇█▆▄▂▁▁▁▂▃▄▅▇█▆▄▂▁▁▂▃▄▆▇█▅▃▂▁▁▂
+w 14 MB/s write                                    peak 38 MB/s  avg 11 MB/s
+▁▁▂▁▁▂▃▂▁▁▁▂▁▁▂▂▁▁▁▂▃▂▁▁▁▁▂▁▁▂▂▁▁▁▂▁▁▁▂▂▁▁▁▂▃▂▁▁▁▂▁▁▂▂▁▁▁▂▁▁▂▃▂▁▁▁▂▁▁▂▂▁▁▂▁▁▂
+ 78s ago ─────────────────────────────────────────────────────────── now
+/ 68%   /var 94%   health 4/4   growth +8.2 GB/day    /var 94% · 11 days left
+```
+
+It is not the full tool with tabs hidden — it is a different view for one machine and one
+question. Toggle either direction at runtime with `L`; the full 8-tab TUI stays the default
+at every terminal size. Below 80×24 Lite shows a notice rather than a clipped grid.
+
+Same grid, keys and palette as [`netwatch --lite`](https://github.com/matthart1983/netwatch)
+— only the subject changes.
+
+The capacity projection needs about a minute of observation before it will commit to a
+number, and stays silent when usage is flat or shrinking. The file table reports **events,
+not bytes**: FSEvents and inotify say that a path changed, not who wrote it or how much
+(see [What's real, what's deferred](#whats-real-what-deferred)).
+
 ## Install
 
 ```bash
@@ -84,8 +117,12 @@ cargo build --release
 | `↑` / `↓` / `j` / `k` | Move selection (Devices, FS) |
 | `p` | Pause / resume sampling |
 | `,` | Settings (columns, temperature unit, SMART interval, theme) |
+| `L` | Switch between the full TUI and Lite |
 | `?` | Help |
 | `q` / `Esc` | Quit |
+| `--lite` | Start in the minimal single-screen view |
+| `--graph` | `bars` (default) or `dots` for btop-style braille |
+| `--graph-fade` | btop's brightness gradient + dot grid |
 | `--diag` | Print collected state and exit (no TUI) |
 | `--theme` | `dark` (default), `light`, `ocean`, `solarized`, `dracula`, `nord`, `terminal` |
 
@@ -107,6 +144,31 @@ diskwatch --theme terminal      # also accepts: system, ansi
 
 The choice isn't persisted between runs — like the other settings, it resets to `dark` on
 restart. Use the flag to make it stick.
+
+### Graph style
+
+Every chart in the app — the Overview aggregate, the IO tab's per-device panels, and both
+Lite charts — draws through one renderer, so a single setting changes them all.
+
+```bash
+diskwatch --graph dots                 # btop-style braille (also: braille, btop)
+diskwatch --graph dots --graph-fade    # ...plus btop's gradient and dot grid
+```
+
+**bars** is the stacked eighth-block look diskwatch shipped with — eight levels per row.
+**dots** packs four braille pixel rows into each cell, so a one-row sparkline resolves four
+distinct heights instead of reading as on/off. On the tall charts the difference is
+subtler; on Lite's 9-column row sparklines it's the difference between a shape and a blob.
+
+**`--graph-fade`** is btop's other half: each chart runs bright at `now` and dims toward the
+left edge, over a faint dot grid. It's a separate switch because the gradient reads fine
+under `bars` too — and because it interpolates in RGB, so it's ignored under
+`--theme terminal`, which exists precisely to pin no RGB. The grid only draws on charts at
+least 16×4, which means the IO and Overview panels get it and Lite's 3- and 2-row charts
+don't.
+
+Both are live in the settings overlay (`,` → **Graph style** / **Graph fade** → `Space`).
+Lite has no settings overlay of its own — press `L`, change it, press `L` back.
 
 ## Tabs in detail
 
@@ -142,6 +204,8 @@ restart. Use the flag to make it stick.
 | Volumes — ZFS, LVM | ⏳ deferred | ⏳ deferred |
 | Hot files (paths) | ✅ FSEvents | ✅ inotify |
 | Hot files — bytes / pid | ❌ needs root `fs_usage` / entitlement | ❌ needs eBPF biosnoop |
+| Capacity growth + time-to-full | ✅ 10-min usage window | ✅ 10-min usage window |
+| Aggregate queue depth | ❌ not exposed by IOKit | ⏳ `/proc/diskstats` col 12, deferred |
 
 ## Design
 

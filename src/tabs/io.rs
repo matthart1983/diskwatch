@@ -13,8 +13,8 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::collect::{DeviceHistory, IoTick};
 use crate::ui::format::fmt_rate;
+use crate::ui::graph;
 use crate::ui::palette as p;
-use crate::ui::sparkline::BaselineSparkline;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     if app.io.latest.is_empty() {
@@ -273,19 +273,23 @@ fn draw_panel(f: &mut Frame, area: Rect, tick: &IoTick, history: Option<&DeviceH
         },
     );
 
-    // Single sparkline of combined throughput. Baseline-aware so the
-    // panel is visually filled from the first sample.
+    // Single chart of combined throughput. Routed through the graph
+    // module so it follows the app-wide bars/dots setting; baseline-aware
+    // so the panel is visually filled from the first sample.
     if let Some(h) = history {
         let panel_inner_h = inner.height.saturating_sub(3);
         let data: Vec<f64> = h.combined.iter().copied().collect();
-        f.render_widget(
-            BaselineSparkline::new(&data).style(Style::default().fg(p::cyan()).bg(p::bg())),
+        graph::render(
+            f.buffer_mut(),
             Rect {
                 x: inner.x + 1,
                 y: inner.y + 2,
                 width: inner.width.saturating_sub(2),
                 height: panel_inner_h,
             },
+            &data,
+            p::cyan(),
+            graph::opts(),
         );
     }
 

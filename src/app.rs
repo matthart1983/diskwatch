@@ -34,6 +34,17 @@ pub const INTERVAL_STEP_SECS: u64 = 60;
 
 pub struct Options {
     pub start_tab: Option<String>,
+    /// Start in the minimal single-screen view. Opt-in only — the full
+    /// TUI stays the default at every terminal size.
+    pub lite: bool,
+}
+
+/// Which of the two views is on screen. Lite is a mode, not a tab: it
+/// has its own key surface and its own layout contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Full,
+    Lite,
 }
 
 /// Bitflags for which columns are visible in the Overview tab's
@@ -109,6 +120,13 @@ pub struct HostInfo {
 
 pub struct App {
     pub active_tab: TabId,
+    pub view: ViewMode,
+    /// Lite's selection / filter / detail state. Persists across a
+    /// round trip to the full TUI and back.
+    pub lite: crate::ui::lite::LiteState,
+    /// Last drawn area, so the key handler can ask the Lite layout how
+    /// many rows are visible without a frame in hand.
+    pub last_area: Rect,
     pub live: LiveState,
     pub host: HostInfo,
     pub devices: Vec<collect::DeviceTick>,
@@ -117,6 +135,8 @@ pub struct App {
     pub io: collect::IoCollector,
     pub smart: collect::SmartCollector,
     pub hot_files: collect::hot_files::HotFileWatcher,
+    /// Per-mount capacity trend. Feeds Lite's growth + time-to-full.
+    pub growth: collect::GrowthTracker,
     pub insights: Vec<crate::insights::Insight>,
     pub selected_device: usize,
     pub selected_fs: usize,
@@ -152,7 +172,7 @@ pub struct App {
 }
 
 impl App {
-    fn new(start: TabId) -> Self {
+    fn new(start: TabId, view: ViewMode) -> Self {
         let devices = collect::devices::collect();
         let filesystems = collect::filesystems::collect();
         let volumes = collect::volumes::collect();
@@ -165,6 +185,9 @@ impl App {
         let hot_files = collect::hot_files::HotFileWatcher::start(&root_refs);
         Self {
             active_tab: start,
+            view,
+            lite: crate::ui::lite::LiteState::default(),
+            last_area: Rect::new(0, 0, 0, 0),
             live: LiveState::Live,
             host: read_host(devices.len()),
             selected_device: 0,
@@ -175,6 +198,7 @@ impl App {
             io,
             smart,
             hot_files,
+            growth: collect::GrowthTracker::new(),
             insights: Vec::new(),
             last_metadata_refresh: Instant::now(),
             last_usage_refresh: Instant::now(),
@@ -204,6 +228,7 @@ impl App {
         if usage_elapsed >= Duration::from_millis(1000) {
             collect::devices::refresh_usage(&mut self.devices);
             self.filesystems = collect::filesystems::collect();
+            self.growth.observe(&self.filesystems);
             if self.selected_fs >= self.filesystems.len() && !self.filesystems.is_empty() {
                 self.selected_fs = self.filesystems.len() - 1;
             }
@@ -254,7 +279,12 @@ pub fn run(opts: Options) -> Result<()> {
         .as_deref()
         .and_then(TabId::from_str)
         .unwrap_or(TabId::Overview);
-    let mut app = App::new(start);
+    let view = if opts.lite {
+        ViewMode::Lite
+    } else {
+        ViewMode::Full
+    };
+    let mut app = App::new(start, view);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -289,6 +319,15 @@ fn main_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
 }
 
 fn handle_key(app: &mut App, key: KeyCode) {
+    // Lite owns its whole key surface — the full TUI's tab cycling,
+    // digit jumps and SMART-interval nudges have no meaning there, and
+    // letting them through would silently mutate state the user can't
+    // see. The help overlay is shared, so it is handled first.
+    if app.view == ViewMode::Lite && !app.show_help {
+        handle_lite_key(app, key);
+        return;
+    }
+
     // While the help overlay is up, every key except `?` and `q` / `Esc`
     // just dismisses it. Keeps the overlay from accidentally triggering
     // tab switches underneath.
@@ -328,6 +367,10 @@ fn handle_key(app: &mut App, key: KeyCode) {
             app.show_settings = !app.show_settings;
             app.settings_cursor = 0;
         }
+
+        // Shift+L drops to the minimal single-screen view. Lowercase `l`
+        // is already the vim-style right/selection key.
+        KeyCode::Char('L') => app.view = ViewMode::Lite,
 
         // Force a SMART refresh on the next tick.
         KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -410,6 +453,121 @@ fn handle_key(app: &mut App, key: KeyCode) {
     }
 }
 
+/// Lite's complete key surface.
+///
+/// Six keys are advertised in the footer (`q p / ↵ L ?`); navigation and
+/// `Esc` are deliberately unadvertised because they are conventions from
+/// `less`/`vim`/`top`, and the `?` overlay lists them. The design handoff
+/// specified five keys and no way to move the selection or leave the
+/// filter — see the implementation plan for why that count was wrong.
+fn handle_lite_key(app: &mut App, key: KeyCode) {
+    use crate::ui::lite;
+
+    // Filter input swallows printable keys, so it has to be checked
+    // before anything that binds a letter.
+    if app.lite.filter_input {
+        match key {
+            KeyCode::Esc => {
+                app.lite.filter_input = false;
+                app.lite.filter_text.clear();
+                app.lite.selected = 0;
+                app.lite.offset = 0;
+            }
+            // Commit the filter but keep it applied — the list stays
+            // narrowed so ↵ can then open detail on a match.
+            KeyCode::Enter => app.lite.filter_input = false,
+            KeyCode::Backspace => {
+                app.lite.filter_text.pop();
+                app.lite.selected = 0;
+                app.lite.offset = 0;
+            }
+            KeyCode::Char(c) => {
+                app.lite.filter_text.push(c);
+                app.lite.selected = 0;
+                app.lite.offset = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let count = lite::filter_rows(lite::collect_rows(app), &app.lite.filter_text).len();
+    let visible = lite::Layout::new(app.last_area).visible_files(app.lite.detail_open);
+
+    match key {
+        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('L') => {
+            app.view = ViewMode::Full;
+            app.lite.detail_open = false;
+            app.lite.filter_input = false;
+        }
+        KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('p') => {
+            app.live = match app.live {
+                LiveState::Live => LiveState::Paused,
+                LiveState::Paused => LiveState::Live,
+            };
+        }
+        KeyCode::Char('/') => {
+            app.lite.filter_input = true;
+            app.lite.filter_text.clear();
+        }
+        KeyCode::Enter => app.lite.detail_open = !app.lite.detail_open,
+        KeyCode::Esc => {
+            // Esc unwinds one layer at a time: detail, then the filter.
+            // Only when neither is open does it mean "quit", matching
+            // the full TUI.
+            if app.lite.detail_open {
+                app.lite.detail_open = false;
+            } else if !app.lite.filter_text.is_empty() {
+                app.lite.filter_text.clear();
+                app.lite.selected = 0;
+                app.lite.offset = 0;
+            } else {
+                app.should_quit = true;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+            app.lite.selected = (app.lite.selected + 1).min(count - 1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.lite.selected = app.lite.selected.saturating_sub(1);
+        }
+        KeyCode::Home => app.lite.selected = 0,
+        KeyCode::End => app.lite.selected = count.saturating_sub(1),
+        _ => {}
+    }
+
+    clamp_lite_scroll(app, count, visible);
+}
+
+/// Keep the selection inside the visible window, and — when detail is
+/// open — far enough from the bottom that its three rows fit before the
+/// prompt row.
+fn clamp_lite_scroll(app: &mut App, count: usize, visible: u16) {
+    let lite = &mut app.lite;
+    if count == 0 {
+        lite.selected = 0;
+        lite.offset = 0;
+        return;
+    }
+    lite.selected = lite.selected.min(count - 1);
+    let visible = visible.max(1) as usize;
+
+    if lite.selected < lite.offset {
+        lite.offset = lite.selected;
+    }
+    // The detail block consumes rows *below* the selected row, so when
+    // it's open the selection must sit at least DETAIL_ROWS above the
+    // window bottom. `visible` already excludes those rows, so the same
+    // arithmetic covers both cases.
+    if lite.selected >= lite.offset + visible {
+        lite.offset = lite.selected + 1 - visible;
+    }
+    let max_offset = count.saturating_sub(visible);
+    lite.offset = lite.offset.min(max_offset);
+}
+
 /// True when the active tab exposes a list of items (devices,
 /// filesystems) the user navigates with arrow keys. On these tabs,
 /// ←/→ moves the cursor; on tabs without a picker, ←/→ cycles tabs.
@@ -427,7 +585,7 @@ fn picker_active(app: &App) -> bool {
 
 // Settings modal: how many rows in the dialog. Kept as a constant so
 // `handle_settings_key` and `draw_settings_overlay` agree on the bounds.
-const SETTINGS_ROWS: usize = 8;
+const SETTINGS_ROWS: usize = 10;
 // Below this index, rows are toggles (column visibility bitflags);
 // at or above, rows are cycle setters (temp unit, SMART interval, theme).
 const SETTINGS_FIRST_CYCLE: usize = 5;
@@ -483,6 +641,14 @@ fn handle_settings_key(app: &mut App, key: KeyCode) {
                     // reference through every render fn. Nothing to store
                     // here — the next draw picks it up.
                     crate::ui::theme::cycle();
+                }
+                // Graph style and fade live in the same kind of global,
+                // for the same reason.
+                8 => {
+                    crate::ui::graph::cycle();
+                }
+                9 => {
+                    crate::ui::graph::toggle_fade();
                 }
                 _ => {}
             }
@@ -550,7 +716,15 @@ fn step_label() -> String {
     format!("±{}s", INTERVAL_STEP_SECS)
 }
 
-fn draw(f: &mut ratatui::Frame, app: &App) {
+fn draw(f: &mut ratatui::Frame, app: &mut App) {
+    // Stash the area so the Lite key handler can resolve its layout
+    // between frames. Done before the 0×0 guard so a resize to nothing
+    // and back doesn't leave a stale size behind.
+    app.last_area = f.area();
+    draw_inner(f, app);
+}
+
+fn draw_inner(f: &mut ratatui::Frame, app: &App) {
     // Defensive: ratatui 0.29 panics on any draw into a Rect with
     // width=0 or height=0 (Buffer::cell_mut bounds check at
     // buffer.rs:253). Some terminals report a 0×0 size for the first
@@ -565,6 +739,16 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     // Paint the whole canvas with the terminal-bg before chrome draws, so
     // unfilled regions don't show through with the host terminal's default.
     f.render_widget(Paragraph::new("").style(Style::default().bg(p::bg())), full);
+
+    // Lite is a whole-screen view: no header, no tab bar, no footer
+    // chrome. It draws its own 24 rows and nothing else.
+    if app.view == ViewMode::Lite {
+        crate::ui::lite::render(f, app, full);
+        if app.show_help {
+            draw_lite_help_overlay(f, full);
+        }
+        return;
+    }
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -614,7 +798,10 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     }
 
     let popup_w = 60u16.min(area.width.saturating_sub(4));
-    let popup_h = 22u16.min(area.height.saturating_sub(4));
+    // 21 content lines plus the two border rows. The list already filled
+    // the box exactly before `L` was added, so this has to grow with it
+    // or the last line silently drops off.
+    let popup_h = 23u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup = Rect {
@@ -663,6 +850,7 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(vec![key("0"), desc("reset interval to 5 min (default)")]),
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume live updates")]),
+        Line::from(vec![key("L"), desc("switch to Lite — one 80×24 screen")]),
         Line::from(vec![key("?"), desc("toggle this help")]),
         Line::from(vec![
             key(","),
@@ -678,24 +866,26 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+/// Lite's `?` overlay. Separate from the full TUI's because Lite binds a
+/// different set — and because this is where the unadvertised keys are
+/// documented, which is the whole justification for keeping the footer to
+/// six. Returns to the same screen; never a seventh view.
+fn draw_lite_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     use ratatui::style::Modifier;
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-    // Same defensive guard as the help overlay — ratatui 0.29 panics on
-    // 0×0 areas. See comment in `draw()`.
     if area.width < 4 || area.height < 4 {
         return;
     }
 
-    let popup_w = 60u16.min(area.width.saturating_sub(4));
-    let popup_h = (SETTINGS_ROWS as u16 + 6).min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_w = 54u16.min(area.width.saturating_sub(4));
+    // 13 content lines plus two border rows, capped so it still fits
+    // inside Lite's own 24-row floor.
+    let popup_h = 15u16.min(area.height.saturating_sub(4));
     let popup = Rect {
-        x,
-        y,
+        x: area.x + (area.width.saturating_sub(popup_w)) / 2,
+        y: area.y + (area.height.saturating_sub(popup_h)) / 2,
         width: popup_w,
         height: popup_h,
     };
@@ -708,18 +898,71 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::cyan()))
         .title(Span::styled(
-            " DiskWatch — settings ",
+            " DiskWatch Lite — key bindings ",
             Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(p::bg()));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    // Build rows. Each row is a tuple of (label, value-text). The
-    // cursor paints a `>` marker on the highlighted row.
+    let key = |k: &'static str| {
+        Span::styled(
+            format!(" {:<10}", k),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
+        )
+    };
+    let desc = |d: &'static str| Span::styled(d, Style::default().fg(p::fg()));
+
+    let lines = vec![
+        Line::from(vec![key("↑ ↓ / j k"), desc("move selection")]),
+        Line::from(vec![key("↵"), desc("expand / collapse detail")]),
+        Line::from(vec![key("/"), desc("filter by file or path")]),
+        Line::from(vec![key("Esc"), desc("close detail, then filter")]),
+        Line::from(vec![key("Home End"), desc("first / last row")]),
+        Line::from(""),
+        Line::from(vec![key("p"), desc("pause / resume")]),
+        Line::from(vec![key("L"), desc("switch to the full 8-tab view")]),
+        Line::from(vec![key("q"), desc("quit")]),
+        Line::from(""),
+        Line::from(Span::styled(
+            // Lite has no settings overlay — six keys is the point. Say
+            // where the dials are rather than leaving them undiscoverable.
+            "  theme + graph style: L, then ,  (or --graph dots)",
+            Style::default().fg(p::dim()),
+        )),
+        Line::from(Span::styled(
+            "  read-only: diskwatch never deletes or trims",
+            Style::default().fg(p::dim()),
+        )),
+        Line::from(Span::styled(
+            "  press any key to dismiss",
+            Style::default().fg(p::dim()),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Popup width, and the columns the row renderer gives to the label.
+/// The value gets whatever is left, which is why several values below are
+/// written tersely — see `settings_values_fit_their_column`.
+const SETTINGS_POPUP_W: u16 = 60;
+const SETTINGS_LABEL_W: u16 = 38;
+/// Columns the cursor marker occupies (`" > "` / `"   "`).
+const SETTINGS_MARKER_W: u16 = 3;
+
+/// Columns a settings row's *value* may occupy before the renderer
+/// truncates it mid-word. Two borders eat 2 of the popup width.
+const fn settings_value_w() -> u16 {
+    SETTINGS_POPUP_W - 2 - SETTINGS_MARKER_W - SETTINGS_LABEL_W
+}
+
+/// The settings rows, as (label, value) pairs. Extracted from the
+/// renderer so the value-width constraint can be asserted in a test
+/// instead of restated as a comment on every row that has to respect it.
+fn settings_rows(app: &App) -> Vec<(&'static str, String)> {
     let on = "[x]";
     let off = "[ ]";
-    let rows: Vec<(&str, String)> = vec![
+    vec![
         (
             "Overview  DEVICES — SIZE column",
             (if app.visible_columns.contains(VisibleColumns::SIZE) {
@@ -768,7 +1011,10 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ("Temperature unit", app.temp_unit.label().to_string()),
         (
             "SMART poll interval",
-            format!("{} (r refreshes now)", app.smart_interval_label),
+            // "(r refreshes now)" overran the 17-column value slot and
+            // rendered as "(r refreshes n". Same constraint as the Theme
+            // and Graph fade rows below.
+            format!("{} (r refreshes)", app.smart_interval_label),
         ),
         (
             // Value stays a bare name: the popup is 60 cols and the row
@@ -778,7 +1024,62 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
             "Theme",
             crate::ui::theme::name().to_string(),
         ),
-    ];
+        ("Graph style", crate::ui::graph::name().to_string()),
+        (
+            "Graph fade (btop gradient)",
+            if crate::ui::theme::name() == "terminal" {
+                // Say why rather than showing a toggle that does nothing:
+                // fade interpolates in RGB, which is exactly what this
+                // theme exists to avoid. Kept short — the value column is
+                // 17 cols and the row renderer truncates mid-word.
+                "n/a (terminal)".to_string()
+            } else if crate::ui::graph::fade_enabled() {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            },
+        ),
+    ]
+}
+
+fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    use ratatui::style::Modifier;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    // Same defensive guard as the help overlay — ratatui 0.29 panics on
+    // 0×0 areas. See comment in `draw()`.
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+
+    let popup_w = SETTINGS_POPUP_W.min(area.width.saturating_sub(4));
+    let popup_h = (SETTINGS_ROWS as u16 + 6).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: popup_w,
+        height: popup_h,
+    };
+    if popup.width == 0 || popup.height == 0 {
+        return;
+    }
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p::cyan()))
+        .title(Span::styled(
+            " DiskWatch — settings ",
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(p::bg()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = settings_rows(app);
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
@@ -787,11 +1088,13 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     )));
     lines.push(Line::from(""));
     for (i, (label, value)) in rows.iter().enumerate() {
-        let marker = if i == app.settings_cursor {
-            " > "
-        } else {
-            "   "
-        };
+        // Both forms are padded to SETTINGS_MARKER_W so the value-column
+        // arithmetic in `settings_value_w` stays true of what's drawn.
+        let marker = format!(
+            "{:^width$}",
+            if i == app.settings_cursor { ">" } else { "" },
+            width = SETTINGS_MARKER_W as usize
+        );
         let is_cycle = i >= SETTINGS_FIRST_CYCLE;
         let label_color = if is_cycle { p::yellow() } else { p::fg() };
         let value_color = if is_cycle {
@@ -808,8 +1111,18 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         };
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
-            Span::styled(format!("{:<38}", label), Style::default().fg(label_color)),
-            Span::styled(value.clone(), Style::default().fg(value_color)),
+            Span::styled(
+                format!("{:<width$}", label, width = SETTINGS_LABEL_W as usize),
+                Style::default().fg(label_color),
+            ),
+            // Belt and braces: `settings_values_fit_their_column` keeps
+            // values inside the budget, but if one ever escapes it,
+            // degrade to a visible ellipsis rather than a silent shear
+            // that reads as a typo.
+            Span::styled(
+                crate::ui::lite::truncate_end(value, settings_value_w()),
+                Style::default().fg(value_color),
+            ),
         ]));
     }
     lines.push(Line::from(""));
@@ -845,6 +1158,88 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn settings_rows_match_their_action_dispatch() {
+        // The overlay builds its row list in one place and dispatches on
+        // the cursor index in another. If they drift, the last rows
+        // become unreachable — silently, because the cursor still moves
+        // over them. This pins the two together.
+        let app = App::new(TabId::Overview, ViewMode::Full);
+        let backend = TestBackend::new(130, 36);
+        let mut term = Terminal::new(backend).expect("terminal");
+        term.draw(|f| super::draw_settings_overlay(f, Rect::new(0, 0, 130, 36), &app))
+            .expect("draw");
+
+        // Every index the cursor can reach must do something. `handle_
+        // settings_key` is the only place that knows, so exercise it:
+        // Space on the last row has to change observable state.
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        app.settings_cursor = SETTINGS_ROWS - 1;
+        let before = crate::ui::graph::fade_enabled();
+        handle_settings_key(&mut app, KeyCode::Char(' '));
+        assert_ne!(
+            crate::ui::graph::fade_enabled(),
+            before,
+            "the last settings row is unreachable — SETTINGS_ROWS and the \
+             dispatch arms have drifted apart"
+        );
+        // Leave the global as we found it.
+        crate::ui::graph::set_fade(before);
+    }
+
+    #[test]
+    fn settings_values_fit_their_column() {
+        // The row renderer pads the label to a fixed width and lets the
+        // value take the rest, with no wrapping — an over-long value is
+        // silently sheared mid-word. This shipped that way on the SMART
+        // row ("5m (r refreshes n") and nothing caught it, so pin it.
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        let budget = settings_value_w() as usize;
+
+        // Exercise the states that produce the longest values: the
+        // widest temperature unit, every theme (the `terminal` theme
+        // swaps the fade value for an explanation), and both fade states.
+        for theme in crate::ui::theme::THEME_NAMES {
+            crate::ui::theme::set_by_name(theme);
+            for unit in [TempUnit::Celsius, TempUnit::Fahrenheit] {
+                app.temp_unit = unit;
+                for fade in [true, false] {
+                    crate::ui::graph::set_fade(fade);
+                    for (label, value) in settings_rows(&app) {
+                        assert!(
+                            value.chars().count() <= budget,
+                            "settings value {value:?} for {label:?} is {} cols, \
+                             but the column is {budget} — it will render truncated",
+                            value.chars().count()
+                        );
+                    }
+                }
+            }
+        }
+        crate::ui::theme::set_by_name("dark");
+        crate::ui::graph::set_fade(false);
+    }
+
+    #[test]
+    fn settings_row_count_matches_the_rendered_rows() {
+        // SETTINGS_ROWS drives cursor bounds and popup height; the row
+        // list drives what's drawn. If they disagree the cursor either
+        // walks off the visible list or can't reach the last row.
+        let app = App::new(TabId::Overview, ViewMode::Full);
+        assert_eq!(settings_rows(&app).len(), SETTINGS_ROWS);
+    }
+
+    #[test]
+    fn graph_style_survives_a_round_trip_through_the_settings_overlay() {
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        let start = crate::ui::graph::name();
+        app.settings_cursor = SETTINGS_ROWS - 2; // Graph style
+        handle_settings_key(&mut app, KeyCode::Char(' '));
+        assert_ne!(crate::ui::graph::name(), start);
+        handle_settings_key(&mut app, KeyCode::Char(' '));
+        assert_eq!(crate::ui::graph::name(), start);
+    }
+
+    #[test]
     fn devices_collector_returns_something() {
         // Smoke test on whichever platform `cargo test` runs on. We don't
         // assert specific counts — CI VMs vary — only that it doesn't
@@ -868,11 +1263,106 @@ mod tests {
     fn render_all_tabs(width: u16, height: u16) {
         let backend = TestBackend::new(width, height);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(TabId::Overview);
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
         for tab in ALL_TABS {
             app.active_tab = *tab;
-            term.draw(|f| super::draw(f, &app)).expect("draw");
+            term.draw(|f| super::draw(f, &mut app)).expect("draw");
         }
+    }
+
+    /// Draw Lite in every state it can be in, at one size.
+    fn render_lite(width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(TabId::Overview, ViewMode::Lite);
+        // Give the growth tracker and the file list something to chew
+        // on so the capacity row and table exercise their real paths.
+        app.growth.observe(&app.filesystems);
+
+        for (paused, detail, filter, help) in [
+            (false, false, "", false),
+            (true, false, "", false),
+            (false, true, "", false),
+            (false, false, "log", false),
+            (false, true, "log", false),
+            (false, false, "", true),
+        ] {
+            app.live = if paused {
+                LiveState::Paused
+            } else {
+                LiveState::Live
+            };
+            app.lite.detail_open = detail;
+            app.lite.filter_text = filter.to_string();
+            app.show_help = help;
+            term.draw(|f| super::draw(f, &mut app)).expect("draw");
+        }
+    }
+
+    #[test]
+    fn lite_renders_at_the_reference_grid() {
+        render_lite(crate::ui::lite::GRID_W, crate::ui::lite::GRID_H);
+    }
+
+    #[test]
+    fn lite_renders_on_a_wide_terminal() {
+        // The adaptive layout has to hold at sizes the handoff never
+        // considered — it specified 80×24 and nothing else.
+        render_lite(200, 60);
+    }
+
+    #[test]
+    fn lite_renders_below_its_floor_without_panicking() {
+        // Under 80×24 Lite shows a notice instead of a clipped grid.
+        render_lite(40, 12);
+        render_lite(79, 23);
+    }
+
+    #[test]
+    fn lite_key_surface_does_not_leak_into_the_full_tui() {
+        // Lite binds `L` to leave, `Esc` to unwind, and swallows the
+        // full TUI's tab keys — a stray `3` must not switch tabs
+        // underneath a view that has none.
+        let mut app = App::new(TabId::Overview, ViewMode::Lite);
+        super::handle_key(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.active_tab, TabId::Overview);
+        assert_eq!(app.view, ViewMode::Lite);
+
+        super::handle_key(&mut app, KeyCode::Char('L'));
+        assert_eq!(app.view, ViewMode::Full);
+        super::handle_key(&mut app, KeyCode::Char('L'));
+        assert_eq!(app.view, ViewMode::Lite);
+    }
+
+    #[test]
+    fn lite_filter_captures_printable_keys() {
+        // `/` then `p` must type a `p`, not toggle pause — the filter
+        // has to be checked before any letter binding.
+        let mut app = App::new(TabId::Overview, ViewMode::Lite);
+        super::handle_key(&mut app, KeyCode::Char('/'));
+        super::handle_key(&mut app, KeyCode::Char('p'));
+        super::handle_key(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.lite.filter_text, "pq");
+        assert_eq!(app.live, LiveState::Live, "p must not have paused");
+        assert!(!app.should_quit, "q must not have quit");
+    }
+
+    #[test]
+    fn lite_esc_unwinds_one_layer_at_a_time() {
+        let mut app = App::new(TabId::Overview, ViewMode::Lite);
+        app.lite.filter_text = "log".into();
+        app.lite.detail_open = true;
+
+        super::handle_key(&mut app, KeyCode::Esc);
+        assert!(!app.lite.detail_open, "first Esc closes detail");
+        assert_eq!(app.lite.filter_text, "log", "and leaves the filter");
+
+        super::handle_key(&mut app, KeyCode::Esc);
+        assert!(app.lite.filter_text.is_empty(), "second Esc clears filter");
+        assert!(!app.should_quit, "and still does not quit");
+
+        super::handle_key(&mut app, KeyCode::Esc);
+        assert!(app.should_quit, "third Esc, with nothing open, quits");
     }
 
     #[test]

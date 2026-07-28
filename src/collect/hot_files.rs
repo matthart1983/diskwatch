@@ -17,7 +17,7 @@
 //! So our "Hot Files" view shows the most-modified paths by event
 //! count, not by throughput, and we surface that limitation in the UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,6 +38,11 @@ const PRUNE_IDLE: Duration = Duration::from_secs(30);
 
 /// Soft cap on tracked paths. Beyond this we prune by age.
 const MAX_TRACKED: usize = 4096;
+
+/// Per-path rate history, in 1 Hz samples. Long enough to fill the Lite
+/// row sparkline on a wide terminal; the sparkline buckets whatever it
+/// is given, so an over-long ring costs nothing but memory.
+pub const HISTORY_LEN: usize = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityKind {
@@ -81,6 +86,9 @@ pub struct FileActivity {
     pub total_events: u64,
     pub last_kind: ActivityKind,
     pub last_seen: Instant,
+    /// One `events_per_sec` reading per second, oldest first. Written
+    /// by `decay()`, which the App calls at 1 Hz.
+    pub history: VecDeque<f64>,
 }
 
 #[derive(Default)]
@@ -109,6 +117,7 @@ impl HotFileState {
                 total_events: 0,
                 last_kind: kind,
                 last_seen: now,
+                history: VecDeque::new(),
             });
         entry.total_events += 1;
         entry.last_kind = kind;
@@ -180,6 +189,15 @@ impl HotFileWatcher {
             if now.duration_since(a.last_seen) > PRUNE_IDLE {
                 return false;
             }
+            // Sample before decaying: `events_per_sec` currently holds
+            // the events this interval accumulated, which is the rate
+            // for the second just ended. Decaying first would record
+            // every sample already faded.
+            if a.history.len() == HISTORY_LEN {
+                a.history.pop_front();
+            }
+            a.history.push_back(a.events_per_sec);
+
             a.events_per_sec *= factor;
             if a.events_per_sec < 0.01 {
                 a.events_per_sec = 0.0;

@@ -30,6 +30,15 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 /// has real samples once the ring is warm.
 const RING_LEN: usize = 240;
 
+/// Host-wide 1 Hz ring length, in seconds of history.
+///
+/// The Lite view draws one sample per chart column and its charts are
+/// as wide as the terminal, so this has to cover the widest sensible
+/// terminal rather than Lite's 78-column reference grid. Lite takes the
+/// rightmost `content_w` samples and left-pads if the ring is still
+/// warming.
+pub const AGG_RING_SECS: usize = 300;
+
 /// Latency observation window — 300 samples at 5Hz = 60s of percentile
 /// history per device per direction.
 const LATENCY_WINDOW: usize = 300;
@@ -85,10 +94,51 @@ struct DeviceTotals {
     total_time_write_ns: u64,
 }
 
+/// Host-wide read/write byte rates at 1 Hz, summed across devices.
+///
+/// The per-device `history` rings are 5 Hz and per-device; the Lite
+/// view wants one aggregate sample per chart column per second. Rather
+/// than resample per frame, we accumulate the 5 Hz samples and emit
+/// their mean once a second — the mean, not the last value, because a
+/// second of throughput is the average over that second and taking the
+/// final 200ms slice would show phantom idle gaps between bursts.
+#[derive(Debug, Default)]
+pub struct AggHistory {
+    pub read_bps: VecDeque<f64>,
+    pub write_bps: VecDeque<f64>,
+    /// Accumulator for the second currently in progress.
+    acc_read: f64,
+    acc_write: f64,
+    acc_n: u32,
+    last_emit: Option<Instant>,
+}
+
+impl AggHistory {
+    fn accumulate(&mut self, read_bps: f64, write_bps: f64, now: Instant) {
+        self.acc_read += read_bps;
+        self.acc_write += write_bps;
+        self.acc_n += 1;
+
+        let last = *self.last_emit.get_or_insert(now);
+        if now.duration_since(last) < Duration::from_secs(1) {
+            return;
+        }
+        let n = self.acc_n.max(1) as f64;
+        push_ring(&mut self.read_bps, self.acc_read / n, AGG_RING_SECS);
+        push_ring(&mut self.write_bps, self.acc_write / n, AGG_RING_SECS);
+        self.acc_read = 0.0;
+        self.acc_write = 0.0;
+        self.acc_n = 0;
+        self.last_emit = Some(now);
+    }
+}
+
 pub struct IoCollector {
     last_sample: Instant,
     prev_totals: HashMap<String, DeviceTotals>,
     pub history: HashMap<String, DeviceHistory>,
+    /// Host-wide 1 Hz rings. See [`AggHistory`].
+    pub agg: AggHistory,
     pub latest: Vec<IoTick>,
 }
 
@@ -99,8 +149,17 @@ impl IoCollector {
             last_sample: Instant::now() - SAMPLE_INTERVAL,
             prev_totals: HashMap::new(),
             history: HashMap::new(),
+            agg: AggHistory::default(),
             latest: Vec::new(),
         }
+    }
+
+    /// Current host-wide (read, write) byte rates, summed across devices.
+    pub fn totals_bps(&self) -> (f64, f64) {
+        self.latest
+            .iter()
+            .filter_map(|t| t.split)
+            .fold((0.0, 0.0), |(r, w), (dr, dw)| (r + dr, w + dw))
     }
 
     /// Called from the main loop. Internally rate-limits to 5Hz, so
@@ -117,11 +176,23 @@ impl IoCollector {
         let totals = self.read_totals();
         let mut new_latest: Vec<IoTick> = Vec::new();
         for (device, t) in &totals {
-            let prev = self
-                .prev_totals
-                .get(device)
-                .copied()
-                .unwrap_or(DeviceTotals::default());
+            // The counters are cumulative since boot. On the first
+            // sighting of a device there is nothing to subtract, so a
+            // zero baseline would report every byte written since boot
+            // as this tick's throughput — a 400 GB/s spike that then
+            // sets the scale for every chart and poisons peak/avg for
+            // the rest of the session. Record the baseline, report
+            // nothing, and start measuring on the next tick.
+            let Some(prev) = self.prev_totals.get(device).copied() else {
+                new_latest.push(IoTick {
+                    device: device.clone(),
+                    bps: 0.0,
+                    split: Some((0.0, 0.0)),
+                    latency_avg: None,
+                    latency_pct: None,
+                });
+                continue;
+            };
 
             let read_bytes_delta = t.bytes_read.saturating_sub(prev.bytes_read) as f64;
             let write_bytes_delta = t.bytes_written.saturating_sub(prev.bytes_written) as f64;
@@ -187,6 +258,16 @@ impl IoCollector {
             });
         }
         new_latest.sort_by(|a, b| a.device.cmp(&b.device));
+
+        // Host-wide rings, summed over this tick's devices. Done here
+        // rather than from `latest` on demand so a paused UI doesn't
+        // leave a hole in the series it later scrolls through.
+        let (agg_r, agg_w) = new_latest
+            .iter()
+            .filter_map(|t| t.split)
+            .fold((0.0, 0.0), |(r, w), (dr, dw)| (r + dr, w + dw));
+        self.agg.accumulate(agg_r, agg_w, now);
+
         self.latest = new_latest;
         self.prev_totals = totals;
     }
