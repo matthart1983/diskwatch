@@ -38,11 +38,11 @@ status bar. Identity, uptime, sort state, paging and every keybind live inside t
 borders, which a box spends anyway.
 
 ```
-╭┤1├─┤ io ├─┤ 4 physical · 6 volumes ├────────────┤ diskwatch 0.2.0  nas-01  up 4d 02:18 ├─╮
+╭┤1├─┤ io ├─┤ 4 physical · 6 volumes ├────────────┤ diskwatch 0.3.0  nas-01  up 4d 02:18 ├─╮
 │ r 128 MB/s  read      peak 412M  avg 96M  iops 5.0k       avg req 36KB · 4 disks summed │
 │ 500M┤                        ⣠⣴⣶⣿⣿⣷⣦⣄                                                   │
 │    0┤ ⣀⣠⣤⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ │
-│   2m┤ ────────────────────────────┤ 60s ├───────────────────────────────────────┤ now ├ │
+│  58s┤ ────────────────────────────┤ 29s ├───────────────────────────────────────┤ now ├ │
 │    0┤ ⠛⠛⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ │
 │ 160M┤                              ⠉⠛⠿⠟⠋                                                │
 │ w 14 MB/s  write      peak 38M   avg 11M  iops 4.3k                                      │
@@ -72,11 +72,15 @@ carries that overlay: it replaces the 8-tab view rather than deliberately reduci
 the dials stay reachable without leaving. Every key it binds is printed in a box border —
 and nothing is printed that it doesn't bind.
 
-Graphs are braille: two samples per character column at four vertical levels per row, with
-the fill coloured by its height in the graph rather than by which series it belongs to.
-Axis ceilings come off each series' own measured peak, on a ladder whose rungs are at most
-25% apart — so a peak always lands in the top fifth of the axis instead of leaving the top
-braille row unused.
+Graphs are braille, at four vertical levels per character row, with the fill coloured by
+its height in the graph rather than by which series it belongs to. Each column is the mean
+of the interval it covers, drawn into both of the cell's sub-columns: feeding a cell two
+consecutive samples instead is what makes bursty IO render as a comb of stripes rather than
+an area, which is the bug netwatch fixed in v0.28.0 and this shipped in v0.2.0. The peak and
+average beside the graph are measured off that same series, so the numbers describe what is
+drawn. Axis ceilings come off each series' own peak, on a ladder whose rungs are at most 25%
+apart — so a peak always lands in the top fifth of the axis instead of leaving the top
+braille row unused — and the axis span is computed from the ring's sample interval.
 
 ---
 
