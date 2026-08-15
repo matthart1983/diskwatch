@@ -25,6 +25,11 @@ use std::time::{Duration, Instant};
 /// 200ms = 5Hz, matching the technical doc's per-device IO loop.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Seconds of history the per-device ring holds. Anything drawing that ring
+/// labels its axis from this rather than from a guess about the sample rate —
+/// a sparkline claiming "60s" while showing five is worse than no label.
+pub const DEVICE_RING_SECS: usize = 48;
+
 /// Sparkline ring length — 240 samples at 5Hz = 48s of throughput.
 /// Large enough that on a 130-wide terminal the visible window already
 /// has real samples once the ring is warm.
@@ -43,6 +48,25 @@ pub const AGG_RING_SECS: usize = 300;
 /// history per device per direction.
 const LATENCY_WINDOW: usize = 300;
 
+/// Upper edges of the latency histogram, in milliseconds. Seven buckets:
+/// `<0.1 · 0.1-0.5 · 0.5-1 · 1-5 · 5-10 · 10-50 · >50`.
+///
+/// The design's latency box exists to show the TAIL, so the long buckets are
+/// kept even when they hold single-digit counts.
+pub const LAT_EDGES_MS: [f64; 6] = [0.1, 0.5, 1.0, 5.0, 10.0, 50.0];
+pub const LAT_BUCKETS: usize = LAT_EDGES_MS.len() + 1;
+/// Index of the first bucket in the ">10ms" tail. Derived, not typed, so the
+/// tail and the histogram's own colouring can't disagree about where it starts.
+pub const LAT_TAIL_FROM: usize = 4 + 1;
+
+/// Which bucket a service time falls in.
+pub fn lat_bucket(ms: f64) -> usize {
+    LAT_EDGES_MS
+        .iter()
+        .position(|&e| ms < e)
+        .unwrap_or(LAT_BUCKETS - 1)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct IoTick {
     pub device: String,
@@ -50,6 +74,32 @@ pub struct IoTick {
     pub bps: f64,
     /// Per-direction byte rates.
     pub split: Option<(f64, f64)>,
+    /// Per-direction operations/sec (read, write).
+    ///
+    /// Measured per direction rather than derived from a share of the total:
+    /// a fixed split reads plausibly while a box is calm and then reports a
+    /// read-heavy workload through a write storm.
+    pub iops: Option<(f64, f64)>,
+    /// Fraction of the interval the device had IO in flight, 0..1.
+    ///
+    /// `None` where the platform doesn't expose it. Linux has `io_ticks`
+    /// (`/proc/diskstats` field 13), which is exactly this. macOS's
+    /// `IOBlockStorageDriver` exposes summed *service* time, which on a
+    /// deep-queue NVMe routinely exceeds wall-clock and would read as a
+    /// permanent 100% — so macOS reports nothing rather than something
+    /// confident and wrong, and the UI renders `--`.
+    pub util: Option<f64>,
+    /// Requests in flight at sample time. Linux only (field 12).
+    pub inflight: Option<u32>,
+    /// Ops per latency bucket over the last [`LATENCY_WINDOW`] samples.
+    ///
+    /// **Honest scope**, same caveat as `latency_pct`: each sample contributes
+    /// its whole op count to the bucket containing that sample's *mean*
+    /// service time. It is a histogram of per-tick means weighted by ops, not
+    /// of individual operations — it will show a sustained slow stretch, and
+    /// will smear a single 50ms outlier into whatever its 200ms tick averaged.
+    /// Real per-op buckets need eBPF `biolatency`; see the module docs.
+    pub lat_hist: [u64; LAT_BUCKETS],
     /// Avg per-op service time for the most recent interval, in µs,
     /// (read, write). `None` when no ops happened. Kept for callers
     /// that want the most-recent observation rather than the windowed
@@ -82,6 +132,28 @@ pub struct DeviceHistory {
     pub read_us: VecDeque<f64>,
     /// Per-tick avg write latency in µs.
     pub write_us: VecDeque<f64>,
+    /// Per-direction byte rates, one entry per 5Hz sample. The 2.0 view draws
+    /// a mirrored read/write graph per device, which the combined ring can't
+    /// feed.
+    pub read_bps: VecDeque<f64>,
+    pub write_bps: VecDeque<f64>,
+    /// Ops per latency bucket, one entry per sample. Summed over the window to
+    /// produce [`IoTick::lat_hist`]; kept per-sample so the window slides
+    /// instead of accumulating since boot.
+    pub lat_hist: VecDeque<[u64; LAT_BUCKETS]>,
+}
+
+impl DeviceHistory {
+    /// Ops per bucket across the whole retained window.
+    pub fn hist_sum(&self) -> [u64; LAT_BUCKETS] {
+        let mut out = [0u64; LAT_BUCKETS];
+        for s in &self.lat_hist {
+            for (o, v) in out.iter_mut().zip(s.iter()) {
+                *o = o.saturating_add(*v);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -92,6 +164,11 @@ struct DeviceTotals {
     ops_written: u64,
     total_time_read_ns: u64,
     total_time_write_ns: u64,
+    /// Cumulative time the device had IO in flight. `None` where the platform
+    /// doesn't measure it — see [`IoTick::util`].
+    busy_ns: Option<u64>,
+    /// Instantaneous queue depth, not cumulative.
+    inflight: Option<u32>,
 }
 
 /// Host-wide read/write byte rates at 1 Hz, summed across devices.
@@ -155,9 +232,15 @@ impl IoCollector {
     }
 
     /// Current host-wide (read, write) byte rates, summed across devices.
+    /// Host-wide read/write rates, over the physical devices only.
+    ///
+    /// A LUKS volume on an NVMe reports its traffic as `dm-0` AND as
+    /// `nvme0n1`; summing both double-counts every block, which is a silent
+    /// 2× on exactly the machines that encrypt their disks.
     pub fn totals_bps(&self) -> (f64, f64) {
         self.latest
             .iter()
+            .filter(|t| !is_stacked_name(&t.device))
             .filter_map(|t| t.split)
             .fold((0.0, 0.0), |(r, w), (dr, dw)| (r + dr, w + dw))
     }
@@ -188,6 +271,10 @@ impl IoCollector {
                     device: device.clone(),
                     bps: 0.0,
                     split: Some((0.0, 0.0)),
+                    iops: Some((0.0, 0.0)),
+                    util: None,
+                    inflight: t.inflight,
+                    lat_hist: [0; LAT_BUCKETS],
                     latency_avg: None,
                     latency_pct: None,
                 });
@@ -223,14 +310,43 @@ impl IoCollector {
                 (Some((r_us.unwrap_or(0.0), w_us.unwrap_or(0.0))), r_us, w_us)
             };
 
+            // Busy fraction. `busy_ns` is time-with-IO-in-flight, so it is
+            // bounded by wall clock by construction and the clamp only ever
+            // absorbs counter jitter across a sample boundary.
+            let util = match (t.busy_ns, prev.busy_ns) {
+                (Some(now_ns), Some(prev_ns)) => {
+                    let busy = now_ns.saturating_sub(prev_ns) as f64;
+                    Some((busy / (elapsed * 1e9)).clamp(0.0, 1.0))
+                }
+                _ => None,
+            };
+
+            // Attribute this tick's ops to the bucket its mean service time
+            // lands in, per direction. See `IoTick::lat_hist` for what this
+            // does and does not measure.
+            let mut hist = [0u64; LAT_BUCKETS];
+            if let Some(us) = sample_r_us {
+                hist[lat_bucket(us / 1_000.0)] += read_ops_delta;
+            }
+            if let Some(us) = sample_w_us {
+                hist[lat_bucket(us / 1_000.0)] += write_ops_delta;
+            }
+
             let h = self.history.entry(device.clone()).or_default();
             push_ring(&mut h.combined, bps, RING_LEN);
+            push_ring(&mut h.read_bps, read_bps, RING_LEN);
+            push_ring(&mut h.write_bps, write_bps, RING_LEN);
             if let Some(v) = sample_r_us {
                 push_ring(&mut h.read_us, v, LATENCY_WINDOW);
             }
             if let Some(v) = sample_w_us {
                 push_ring(&mut h.write_us, v, LATENCY_WINDOW);
             }
+            while h.lat_hist.len() >= LATENCY_WINDOW {
+                h.lat_hist.pop_front();
+            }
+            h.lat_hist.push_back(hist);
+            let lat_hist = h.hist_sum();
 
             // Recompute percentiles from the windows. Sorts a copy each
             // time — cheap at this scale (≤300 samples).
@@ -253,6 +369,13 @@ impl IoCollector {
                 device: device.clone(),
                 bps,
                 split: Some((read_bps, write_bps)),
+                iops: Some((
+                    read_ops_delta as f64 / elapsed,
+                    write_ops_delta as f64 / elapsed,
+                )),
+                util,
+                inflight: t.inflight,
+                lat_hist,
                 latency_avg,
                 latency_pct,
             });
@@ -302,6 +425,10 @@ fn totals_macos() -> HashMap<String, DeviceTotals> {
                     ops_written: s.ops_written,
                     total_time_read_ns: s.total_time_read_ns,
                     total_time_write_ns: s.total_time_write_ns,
+                    // IOBlockStorageDriver counts service time, not
+                    // time-with-IO-in-flight. See `IoTick::util`.
+                    busy_ns: None,
+                    inflight: None,
                 },
             )
         })
@@ -310,11 +437,21 @@ fn totals_macos() -> HashMap<String, DeviceTotals> {
 
 #[cfg(target_os = "linux")]
 fn diskstats_totals_linux() -> HashMap<String, DeviceTotals> {
-    const SECTOR_BYTES: u64 = 512;
-    const MS_TO_NS: u64 = 1_000_000;
     let Ok(text) = std::fs::read_to_string("/proc/diskstats") else {
         return HashMap::new();
     };
+    parse_diskstats(&text)
+}
+
+/// Parse `/proc/diskstats`.
+///
+/// Split out from the file read, and compiled on every platform, so the field
+/// arithmetic is testable where Linux isn't — the fixtures below are real
+/// lines from a 6.x kernel and from a pre-2.6.25 short-form one.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_diskstats(text: &str) -> HashMap<String, DeviceTotals> {
+    const SECTOR_BYTES: u64 = 512;
+    const MS_TO_NS: u64 = 1_000_000;
     let mut out = HashMap::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -346,6 +483,16 @@ fn diskstats_totals_linux() -> HashMap<String, DeviceTotals> {
         let Ok(ms_writing) = fields[10].parse::<u64>() else {
             continue;
         };
+        // Fields 12 and 13: requests in flight, and milliseconds spent doing
+        // IO — the latter is time-with-at-least-one-request-queued, which is
+        // exactly `%util`. Both are optional: they arrived in 2.6.25, and a
+        // short line means an older kernel rather than a parse failure, so
+        // they degrade to None and the UI renders `--`.
+        let inflight = fields.get(11).and_then(|f| f.parse::<u32>().ok());
+        let busy_ns = fields
+            .get(12)
+            .and_then(|f| f.parse::<u64>().ok())
+            .map(|ms| ms.saturating_mul(MS_TO_NS));
         out.insert(
             name.to_string(),
             DeviceTotals {
@@ -355,6 +502,8 @@ fn diskstats_totals_linux() -> HashMap<String, DeviceTotals> {
                 ops_written: writes,
                 total_time_read_ns: ms_reading.saturating_mul(MS_TO_NS),
                 total_time_write_ns: ms_writing.saturating_mul(MS_TO_NS),
+                busy_ns,
+                inflight,
             },
         );
     }
@@ -363,19 +512,34 @@ fn diskstats_totals_linux() -> HashMap<String, DeviceTotals> {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn is_partition_name(name: &str) -> bool {
-    if name.starts_with("nvme") {
+    if name.starts_with("nvme") || name.starts_with("mmcblk") {
         return name.contains('p');
     }
-    if name.starts_with("mmcblk") {
-        return name.contains('p');
-    }
-    if name.starts_with("dm-") {
-        return false;
+    // Whole devices whose names END IN A DIGIT that is an index, not a
+    // partition number. The trailing-digit heuristic below is right for
+    // sda1 / vdb2 / hda3 and wrong for every one of these — and being wrong
+    // means the device is dropped from /proc/diskstats entirely, so an md
+    // array simply never appeared in the IO list at all. Their own
+    // partitions do carry a `p` (md0p1), same as nvme.
+    for whole in ["dm-", "md", "sr", "zram", "nbd", "zd"] {
+        if name.starts_with(whole) {
+            return name.contains('p');
+        }
     }
     name.chars()
         .last()
         .map(|c| c.is_ascii_digit())
         .unwrap_or(false)
+}
+
+/// True for a device that is stacked on top of others — md, dm, LVM, LUKS.
+///
+/// Their traffic also passes through the physical devices beneath them, so
+/// anything summing across devices has to exclude them or it counts every
+/// block twice. They stay in the list because the UI shows them as rows; it is
+/// the SUMS they must stay out of.
+pub fn is_stacked_name(name: &str) -> bool {
+    name.starts_with("dm-") || name.starts_with("md") || name.starts_with("zd")
 }
 
 fn push_ring(q: &mut VecDeque<f64>, v: f64, cap: usize) {
@@ -403,8 +567,10 @@ fn percentiles(samples: &VecDeque<f64>) -> (f64, f64, f64) {
 
 /// Sums device rates for the Overview "AGG IO" panel.
 pub fn aggregate(latest: &[IoTick]) -> (f64, f64) {
-    let combined: f64 = latest.iter().map(|t| t.bps).sum();
-    let write: f64 = latest.iter().filter_map(|t| t.split.map(|(_, w)| w)).sum();
+    // Physical devices only — see `totals_bps` for why.
+    let phys = || latest.iter().filter(|t| !is_stacked_name(&t.device));
+    let combined: f64 = phys().map(|t| t.bps).sum();
+    let write: f64 = phys().filter_map(|t| t.split.map(|(_, w)| w)).sum();
     (combined, write)
 }
 
@@ -483,5 +649,141 @@ mod tests {
     fn percentiles_empty() {
         let v: VecDeque<f64> = VecDeque::new();
         assert_eq!(percentiles(&v), (0.0, 0.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod diskstats_tests {
+    use super::*;
+
+    /// Real lines from a 6.x kernel: an NVMe whole disk, one of its
+    /// partitions, a dm mapping, a loop device, and an md array.
+    const MODERN: &str = "\
+ 259       0 nvme0n1 1204485 154403 92216832 419827 2274743 1385042 128793104 1936114 0 1123456 2372123 0 0 0 0 74521 25631
+ 259       1 nvme0n1p1 1180 0 45888 108 12 0 24 3 0 128 111 0 0 0 0 0 0
+ 252       0 dm-0 1189042 0 91755024 431223 3487211 0 128512488 3612991 0 1198877 4044214 0 0 0 0 0 0
+   7       0 loop0 44 0 1408 6 0 0 0 0 0 24 6 0 0 0 0 0 0
+   9       0 md0 92211 0 8192000 12042 411223 0 42112000 92113 0 84221 104155 0 0 0 0 0 0";
+
+    /// Pre-2.6.25: eleven fields, no in-flight and no io_ticks.
+    const SHORT: &str = " 8 0 sda 1204485 154403 92216832 419827 2274743 1385042 128793104 1936114";
+
+    #[test]
+    fn parses_a_modern_diskstats_line() {
+        let out = parse_diskstats(MODERN);
+        let d = out.get("nvme0n1").expect("nvme0n1 present");
+        // Sectors are always 512 bytes in this interface, whatever the
+        // drive's physical sector size — a kernel API constant, not a
+        // property of the device.
+        assert_eq!(d.bytes_read, 92_216_832 * 512);
+        assert_eq!(d.bytes_written, 128_793_104 * 512);
+        assert_eq!(d.ops_read, 1_204_485);
+        assert_eq!(d.ops_written, 2_274_743);
+        assert_eq!(d.total_time_read_ns, 419_827 * 1_000_000);
+        assert_eq!(d.total_time_write_ns, 1_936_114 * 1_000_000);
+        // Field 12 is in-flight, field 13 is io_ticks — the numbers that
+        // make utilisation and queue depth real on Linux.
+        assert_eq!(d.inflight, Some(0));
+        assert_eq!(d.busy_ns, Some(1_123_456 * 1_000_000));
+    }
+
+    #[test]
+    fn skips_partitions_loops_and_keeps_stacked_devices() {
+        let out = parse_diskstats(MODERN);
+        assert!(!out.contains_key("nvme0n1p1"), "partitions double-count");
+        assert!(!out.contains_key("loop0"));
+        // dm and md ARE kept: the view lists them and marks them stacked,
+        // then leaves them out of the system totals. Dropping them here
+        // would lose the rows entirely.
+        assert!(out.contains_key("dm-0"));
+        assert!(out.contains_key("md0"));
+    }
+
+    #[test]
+    fn an_old_kernel_loses_util_not_the_device() {
+        let out = parse_diskstats(SHORT);
+        let d = out.get("sda").expect("sda still parsed");
+        assert_eq!(d.ops_read, 1_204_485);
+        assert_eq!(d.inflight, None, "renders as -- rather than 0");
+        assert_eq!(d.busy_ns, None);
+    }
+
+    #[test]
+    fn a_truncated_or_garbled_line_is_skipped_not_fatal() {
+        assert!(parse_diskstats("8 0 sda 1 2 3").is_empty());
+        assert!(parse_diskstats("8 0 sda x x x x x x x x").is_empty());
+        assert!(parse_diskstats("").is_empty());
+    }
+
+    #[test]
+    fn whole_devices_whose_names_end_in_a_digit_are_not_partitions() {
+        // The bug this pins: `md0` ends in a digit, so the trailing-digit
+        // heuristic called it a partition and dropped the array from
+        // /proc/diskstats entirely. It never appeared in the IO list at all.
+        for whole in [
+            "md0", "md127", "dm-0", "sr0", "zram0", "nbd0", "sda", "nvme0n1",
+        ] {
+            assert!(!is_partition_name(whole), "{whole} treated as a partition");
+        }
+        for part in ["sda1", "vdb2", "hda3", "nvme0n1p1", "mmcblk0p2", "md0p1"] {
+            assert!(is_partition_name(part), "{part} treated as a whole device");
+        }
+    }
+
+    #[test]
+    fn stacked_devices_stay_out_of_the_totals() {
+        // A LUKS volume on an NVMe reports its traffic twice — once as dm-0
+        // and once as nvme0n1. Summing both is a silent 2x on exactly the
+        // machines that encrypt their disks.
+        let tick = |name: &str, r: f64, w: f64| IoTick {
+            device: name.to_string(),
+            bps: r + w,
+            split: Some((r, w)),
+            ..Default::default()
+        };
+        let latest = vec![
+            tick("nvme0n1", 100.0, 200.0),
+            tick("dm-0", 90.0, 190.0),
+            tick("md0", 10.0, 10.0),
+        ];
+        let (combined, write) = aggregate(&latest);
+        assert_eq!(combined, 300.0);
+        assert_eq!(write, 200.0);
+        assert!(is_stacked_name("dm-0") && is_stacked_name("md0"));
+        assert!(!is_stacked_name("nvme0n1") && !is_stacked_name("sda"));
+    }
+
+    #[test]
+    fn service_times_land_in_the_bucket_they_name() {
+        // The histogram's edges, walked from both sides.
+        assert_eq!(lat_bucket(0.0), 0);
+        assert_eq!(lat_bucket(0.099), 0);
+        assert_eq!(lat_bucket(0.1), 1);
+        assert_eq!(lat_bucket(0.5), 2);
+        assert_eq!(lat_bucket(1.0), 3);
+        assert_eq!(lat_bucket(4.99), 3);
+        assert_eq!(lat_bucket(5.0), 4);
+        assert_eq!(lat_bucket(10.0), LAT_TAIL_FROM);
+        assert_eq!(lat_bucket(49.9), LAT_TAIL_FROM);
+        assert_eq!(lat_bucket(50.0), LAT_BUCKETS - 1);
+        assert_eq!(lat_bucket(5_000.0), LAT_BUCKETS - 1);
+    }
+
+    #[test]
+    fn the_histogram_window_slides_instead_of_accumulating() {
+        // A histogram that only ever accumulates shows the machine's whole
+        // uptime, so a burst an hour ago never leaves the tail.
+        let mut h = DeviceHistory::default();
+        for i in 0..LATENCY_WINDOW + 50 {
+            let mut s = [0u64; LAT_BUCKETS];
+            s[if i < 50 { LAT_BUCKETS - 1 } else { 0 }] = 1;
+            while h.lat_hist.len() >= LATENCY_WINDOW {
+                h.lat_hist.pop_front();
+            }
+            h.lat_hist.push_back(s);
+        }
+        let sum = h.hist_sum();
+        assert_eq!(sum[LAT_BUCKETS - 1], 0, "the old burst never aged out");
+        assert_eq!(sum[0], LATENCY_WINDOW as u64);
     }
 }

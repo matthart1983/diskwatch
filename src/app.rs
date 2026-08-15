@@ -34,17 +34,69 @@ pub const INTERVAL_STEP_SECS: u64 = 60;
 
 pub struct Options {
     pub start_tab: Option<String>,
-    /// Start in the minimal single-screen view. Opt-in only — the full
-    /// TUI stays the default at every terminal size.
-    pub lite: bool,
+    /// Which view to open in. Opt-in only — the full 8-tab TUI stays the
+    /// default at every terminal size.
+    pub view: ViewMode,
 }
 
-/// Which of the two views is on screen. Lite is a mode, not a tab: it
-/// has its own key surface and its own layout contract.
+/// Which view is on screen. Lite and V2 are modes, not tabs: each has
+/// its own key surface and its own layout contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Full,
     Lite,
+    /// The 2.0 screen: six btop-style boxes, zero chrome rows.
+    V2,
+}
+
+/// Config / CLI spellings, in cycle order. `V` walks this list, and the
+/// settings overlay's View row shows the current entry. Same convention as
+/// netwatch, so the muscle memory carries between the two tools.
+pub const VIEW_MODE_NAMES: &[&str] = &["full", "lite", "v2"];
+
+impl ViewMode {
+    /// Resolve a config / CLI spelling. `None` for anything not in
+    /// [`VIEW_MODE_NAMES`], so a typo is rejected at the CLI rather than
+    /// silently starting the default view and looking like a no-op flag.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "full" => Some(ViewMode::Full),
+            "lite" => Some(ViewMode::Lite),
+            "v2" | "btop" | "2.0" => Some(ViewMode::V2),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewMode::Full => "full",
+            ViewMode::Lite => "lite",
+            ViewMode::V2 => "v2",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ViewMode::Full => ViewMode::Lite,
+            ViewMode::Lite => ViewMode::V2,
+            ViewMode::V2 => ViewMode::Full,
+        }
+    }
+}
+
+/// Advance to the next view, from whichever view is asking.
+///
+/// Each view owns its own transient state — Lite's detail pane, the 2.0
+/// view's filter capture — and leaving a view has to close it, or it
+/// reopens against a different selection when the cycle comes back around.
+fn cycle_view(app: &mut App) {
+    app.view = app.view.next();
+    if app.view != ViewMode::Lite {
+        app.lite.detail_open = false;
+    }
+    if app.view != ViewMode::V2 {
+        app.v2.filter_input = false;
+    }
 }
 
 /// Bitflags for which columns are visible in the Overview tab's
@@ -124,6 +176,9 @@ pub struct App {
     /// Lite's selection / filter / detail state. Persists across a
     /// round trip to the full TUI and back.
     pub lite: crate::ui::lite::LiteState,
+    /// The 2.0 view's selection / filter / sort state. Persists across a
+    /// round trip to another view and back, same as Lite's.
+    pub v2: crate::ui::v2::V2State,
     /// Last drawn area, so the key handler can ask the Lite layout how
     /// many rows are visible without a frame in hand.
     pub last_area: Rect,
@@ -171,7 +226,16 @@ pub struct App {
     pub should_quit: bool,
 }
 
+#[cfg(test)]
+pub fn draw_for_test(f: &mut ratatui::Frame, app: &mut App) {
+    draw(f, app);
+}
+
 impl App {
+    #[cfg(test)]
+    pub fn new_for_test(start: TabId, view: ViewMode) -> Self {
+        Self::new(start, view)
+    }
     fn new(start: TabId, view: ViewMode) -> Self {
         let devices = collect::devices::collect();
         let filesystems = collect::filesystems::collect();
@@ -187,6 +251,7 @@ impl App {
             active_tab: start,
             view,
             lite: crate::ui::lite::LiteState::default(),
+            v2: crate::ui::v2::V2State::default(),
             last_area: Rect::new(0, 0, 0, 0),
             live: LiveState::Live,
             host: read_host(devices.len()),
@@ -279,12 +344,7 @@ pub fn run(opts: Options) -> Result<()> {
         .as_deref()
         .and_then(TabId::from_str)
         .unwrap_or(TabId::Overview);
-    let view = if opts.lite {
-        ViewMode::Lite
-    } else {
-        ViewMode::Full
-    };
-    let mut app = App::new(start, view);
+    let mut app = App::new(start, opts.view);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -319,12 +379,24 @@ fn main_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
 }
 
 fn handle_key(app: &mut App, key: KeyCode) {
+    // The settings overlay is shared by every view that offers it, so it
+    // claims the keyboard before any view-specific handler — otherwise the
+    // 2.0 view's `s` would sort the file list behind an open dialog.
+    if app.show_settings && !app.show_help {
+        handle_settings_key(app, key);
+        return;
+    }
+
     // Lite owns its whole key surface — the full TUI's tab cycling,
     // digit jumps and SMART-interval nudges have no meaning there, and
     // letting them through would silently mutate state the user can't
     // see. The help overlay is shared, so it is handled first.
     if app.view == ViewMode::Lite && !app.show_help {
         handle_lite_key(app, key);
+        return;
+    }
+    if app.view == ViewMode::V2 && !app.show_help {
+        handle_v2_key(app, key);
         return;
     }
 
@@ -371,6 +443,10 @@ fn handle_key(app: &mut App, key: KeyCode) {
         // Shift+L drops to the minimal single-screen view. Lowercase `l`
         // is already the vim-style right/selection key.
         KeyCode::Char('L') => app.view = ViewMode::Lite,
+
+        // `V` cycles full → lite → 2.0 → full, netwatch's convention.
+        // `L` above stays as the direct jump to Lite.
+        KeyCode::Char('v') | KeyCode::Char('V') => cycle_view(app),
 
         // Force a SMART refresh on the next tick.
         KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -501,6 +577,10 @@ fn handle_lite_key(app: &mut App, key: KeyCode) {
             app.lite.detail_open = false;
             app.lite.filter_input = false;
         }
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            app.lite.filter_input = false;
+            cycle_view(app);
+        }
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('p') => {
             app.live = match app.live {
@@ -539,6 +619,115 @@ fn handle_lite_key(app: &mut App, key: KeyCode) {
     }
 
     clamp_lite_scroll(app, count, visible);
+}
+
+/// Keys for the 2.0 view.
+///
+/// It owns its whole key surface for the same reason Lite does: the
+/// 8-tab view's tab cycling and digit jumps have no meaning against six
+/// boxes, and letting them through would mutate state the user can't
+/// see. Everything it does bind is advertised in a box border.
+fn handle_v2_key(app: &mut App, key: KeyCode) {
+    use crate::ui::v2;
+
+    // Filter input swallows printable keys, so it is checked before
+    // anything that binds a letter.
+    if app.v2.filter_input {
+        match key {
+            KeyCode::Esc => {
+                app.v2.filter_input = false;
+                app.v2.filter_text.clear();
+                app.v2.selected = 0;
+                app.v2.offset = 0;
+            }
+            KeyCode::Enter => app.v2.filter_input = false,
+            KeyCode::Backspace => {
+                app.v2.filter_text.pop();
+                app.v2.selected = 0;
+                app.v2.offset = 0;
+            }
+            KeyCode::Char(c) => {
+                app.v2.filter_text.push(c);
+                app.v2.selected = 0;
+                app.v2.offset = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let count = v2::sorted_rows(app).len();
+    let visible = v2::visible_files(app.last_area);
+
+    match key {
+        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            app.v2.filter_input = false;
+            cycle_view(app);
+        }
+        KeyCode::Char('L') => {
+            app.view = ViewMode::Lite;
+            app.v2.filter_input = false;
+        }
+        // The 2.0 view carries the settings overlay, unlike Lite: it is a
+        // whole-screen replacement for the 8-tab view rather than a
+        // deliberately six-key one, so the dials have to be reachable
+        // without leaving it.
+        KeyCode::Char(',') => {
+            app.show_settings = true;
+            app.settings_cursor = 0;
+        }
+        KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('p') => {
+            app.live = match app.live {
+                LiveState::Live => LiveState::Paused,
+                LiveState::Paused => LiveState::Live,
+            };
+        }
+        KeyCode::Char('/') => {
+            app.v2.filter_input = true;
+            app.v2.filter_text.clear();
+        }
+        KeyCode::Char('s') => app.v2.sort = app.v2.sort.next(),
+        KeyCode::Esc => {
+            if !app.v2.filter_text.is_empty() {
+                app.v2.filter_text.clear();
+                app.v2.selected = 0;
+                app.v2.offset = 0;
+            } else {
+                app.should_quit = true;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+            app.v2.selected = (app.v2.selected + 1).min(count - 1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.v2.selected = app.v2.selected.saturating_sub(1);
+        }
+        KeyCode::Home => app.v2.selected = 0,
+        KeyCode::End => app.v2.selected = count.saturating_sub(1),
+        _ => {}
+    }
+
+    clamp_v2_scroll(app, count, visible);
+}
+
+/// Keep the selection inside the file box's visible window.
+fn clamp_v2_scroll(app: &mut App, count: usize, visible: u16) {
+    let st = &mut app.v2;
+    if count == 0 || visible == 0 {
+        st.selected = 0;
+        st.offset = 0;
+        return;
+    }
+    st.selected = st.selected.min(count - 1);
+    let visible = visible as usize;
+    if st.selected < st.offset {
+        st.offset = st.selected;
+    } else if st.selected >= st.offset + visible {
+        st.offset = st.selected + 1 - visible;
+    }
+    st.offset = st.offset.min(count.saturating_sub(visible.min(count)));
 }
 
 /// Keep the selection inside the visible window, and — when detail is
@@ -585,7 +774,7 @@ fn picker_active(app: &App) -> bool {
 
 // Settings modal: how many rows in the dialog. Kept as a constant so
 // `handle_settings_key` and `draw_settings_overlay` agree on the bounds.
-const SETTINGS_ROWS: usize = 10;
+const SETTINGS_ROWS: usize = 11;
 // Below this index, rows are toggles (column visibility bitflags);
 // at or above, rows are cycle setters (temp unit, SMART interval, theme).
 const SETTINGS_FIRST_CYCLE: usize = 5;
@@ -642,12 +831,17 @@ fn handle_settings_key(app: &mut App, key: KeyCode) {
                     // here — the next draw picks it up.
                     crate::ui::theme::cycle();
                 }
-                // Graph style and fade live in the same kind of global,
-                // for the same reason.
-                8 => {
+                // The same cycle `V` walks, reachable for anyone who found
+                // the views through the menu rather than the keybinding.
+                // The overlay stays open across the switch, so the next
+                // press keeps cycling and you can see each view behind it.
+                8 => cycle_view(app),
+                // Graph style and fade live in the same kind of global as
+                // the theme, for the same reason.
+                9 => {
                     crate::ui::graph::cycle();
                 }
-                9 => {
+                10 => {
                     crate::ui::graph::toggle_fade();
                 }
                 _ => {}
@@ -746,6 +940,20 @@ fn draw_inner(f: &mut ratatui::Frame, app: &App) {
         crate::ui::lite::render(f, app, full);
         if app.show_help {
             draw_lite_help_overlay(f, full);
+        }
+        return;
+    }
+
+    // The 2.0 view goes further: its boxes tile every row, and the
+    // identity, hotkeys and paging that would need chrome live inside
+    // the borders instead.
+    if app.view == ViewMode::V2 {
+        crate::ui::v2::render(f, full, app);
+        if app.show_settings {
+            draw_settings_overlay(f, full, app);
+        }
+        if app.show_help {
+            draw_v2_help_overlay(f, full);
         }
         return;
     }
@@ -851,6 +1059,7 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume live updates")]),
         Line::from(vec![key("L"), desc("switch to Lite — one 80×24 screen")]),
+        Line::from(vec![key("V"), desc("cycle view: full → lite → 2.0")]),
         Line::from(vec![key("?"), desc("toggle this help")]),
         Line::from(vec![
             key(","),
@@ -921,13 +1130,14 @@ fn draw_lite_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(vec![key("Home End"), desc("first / last row")]),
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume")]),
-        Line::from(vec![key("L"), desc("switch to the full 8-tab view")]),
+        Line::from(vec![key("V"), desc("cycle view: full → lite → 2.0")]),
+        Line::from(vec![key("L"), desc("back to the full 8-tab view")]),
         Line::from(vec![key("q"), desc("quit")]),
         Line::from(""),
         Line::from(Span::styled(
             // Lite has no settings overlay — six keys is the point. Say
             // where the dials are rather than leaving them undiscoverable.
-            "  theme + graph style: L, then ,  (or --graph dots)",
+            "  theme + graph style: V or L, then ,  (or --graph dots)",
             Style::default().fg(p::dim()),
         )),
         Line::from(Span::styled(
@@ -938,6 +1148,65 @@ fn draw_lite_help_overlay(f: &mut ratatui::Frame, area: Rect) {
             "  press any key to dismiss",
             Style::default().fg(p::dim()),
         )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_v2_help_overlay(f: &mut ratatui::Frame, area: Rect) {
+    use ratatui::style::Modifier;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+    let popup_w = 62u16.min(area.width.saturating_sub(4));
+    let popup_h = 16u16.min(area.height.saturating_sub(4));
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(popup_w)) / 2,
+        y: area.y + (area.height.saturating_sub(popup_h)) / 2,
+        width: popup_w,
+        height: popup_h,
+    };
+    if popup.width == 0 || popup.height == 0 {
+        return;
+    }
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p::cyan()))
+        .title(Span::styled(
+            " DiskWatch 2.0 — key bindings ",
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(p::bg()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let key = |k: &'static str| {
+        Span::styled(
+            format!(" {:<10}", k),
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
+        )
+    };
+    let desc = |d: &'static str| Span::styled(d, Style::default().fg(p::fg()));
+    let note = |d: &'static str| Line::from(Span::styled(d, Style::default().fg(p::dim())));
+
+    let lines = vec![
+        Line::from(vec![key("↑ ↓ / j k"), desc("move selection in files")]),
+        Line::from(vec![key("/"), desc("filter by file or path")]),
+        Line::from(vec![key("s"), desc("cycle sort: events / total / name")]),
+        Line::from(vec![key("Home End"), desc("first / last row")]),
+        Line::from(""),
+        Line::from(vec![key("p"), desc("pause / resume")]),
+        Line::from(vec![key("V"), desc("cycle view: full → lite → 2.0")]),
+        Line::from(vec![key("L"), desc("jump straight to Lite")]),
+        Line::from(vec![key(","), desc("settings (theme, view, graphs)")]),
+        Line::from(vec![key("q"), desc("quit")]),
+        Line::from(""),
+        note("  util needs /proc/diskstats — macOS shows --"),
+        note("  latency buckets sample per-tick means, not per-op"),
+        note("  press any key to dismiss"),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -1024,6 +1293,10 @@ fn settings_rows(app: &App) -> Vec<(&'static str, String)> {
             "Theme",
             crate::ui::theme::name().to_string(),
         ),
+        // Value is the bare name, matching `VIEW_MODE_NAMES` and the
+        // `--lite` / `--v2` flags, so what the menu says is what the CLI
+        // takes. `V` walks the same list.
+        ("View", app.view.name().to_string()),
         ("Graph style", crate::ui::graph::name().to_string()),
         (
             "Graph fade (btop gradient)",
@@ -1297,6 +1570,200 @@ mod tests {
             app.show_help = help;
             term.draw(|f| super::draw(f, &mut app)).expect("draw");
         }
+    }
+
+    /// Draw the 2.0 view in every state it can be in, at one size.
+    fn render_v2(width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut term = Terminal::new(backend).expect("terminal");
+        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        app.growth.observe(&app.filesystems);
+        app.io.sample();
+
+        for (filter, filtering, sort, help) in [
+            ("", false, crate::ui::v2::FileSort::Rate, false),
+            ("", false, crate::ui::v2::FileSort::Total, false),
+            ("", false, crate::ui::v2::FileSort::Name, false),
+            ("log", false, crate::ui::v2::FileSort::Rate, false),
+            ("lo", true, crate::ui::v2::FileSort::Rate, false),
+            ("", false, crate::ui::v2::FileSort::Rate, true),
+        ] {
+            app.v2.filter_text = filter.to_string();
+            app.v2.filter_input = filtering;
+            app.v2.sort = sort;
+            app.show_help = help;
+            term.draw(|f| super::draw(f, &mut app)).expect("draw");
+        }
+    }
+
+    #[test]
+    fn v2_renders_at_the_reference_grid() {
+        // The design grid: 130×44.
+        render_v2(130, 44);
+    }
+
+    #[test]
+    fn v2_renders_across_the_sizes_a_terminal_actually_takes() {
+        // Both sides of every layout threshold, including one column and
+        // one row below each — where a saturating_sub would underflow into
+        // a huge width and a box would try to draw off-screen.
+        for (w, h) in [
+            (crate::ui::v2::MIN_FULL_W, crate::ui::v2::MIN_FULL_H),
+            (crate::ui::v2::MIN_FULL_W - 1, crate::ui::v2::MIN_FULL_H),
+            (crate::ui::v2::MIN_FULL_W, crate::ui::v2::MIN_FULL_H - 1),
+            (crate::ui::v2::MIN_W, crate::ui::v2::MIN_H),
+            (crate::ui::v2::MIN_W - 1, crate::ui::v2::MIN_H - 1),
+            (200, 60),
+            (400, 100),
+            (80, 24),
+            (100, 30),
+            (60, 16),
+            (20, 6),
+        ] {
+            render_v2(w, h);
+        }
+    }
+
+    #[test]
+    fn v2_key_surface_does_not_leak_into_the_full_tui() {
+        // Same contract as Lite: a stray `3` must not switch a tab the
+        // view doesn't show, and `s` must sort rather than do nothing.
+        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        super::handle_key(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.active_tab, TabId::Overview);
+        let before = app.v2.sort;
+        super::handle_key(&mut app, KeyCode::Char('s'));
+        assert_ne!(app.v2.sort, before);
+    }
+
+    #[test]
+    fn v_cycles_every_view_and_returns_to_where_it_started() {
+        // netwatch's convention: one key walks full → lite → 2.0 → full,
+        // from whichever view is on screen. `L` stays as the direct jump to
+        // Lite, and the cycle has to come home or a view becomes a trap.
+        for start in [ViewMode::Full, ViewMode::Lite, ViewMode::V2] {
+            let mut app = App::new(TabId::Overview, start);
+            let mut seen = vec![app.view];
+            for _ in 0..VIEW_MODE_NAMES.len() {
+                super::handle_key(&mut app, KeyCode::Char('V'));
+                seen.push(app.view);
+            }
+            assert_eq!(app.view, start, "V did not return to {start:?}");
+            assert_eq!(
+                seen.len() - 1,
+                VIEW_MODE_NAMES.len(),
+                "the cycle skipped a view"
+            );
+            for m in [ViewMode::Full, ViewMode::Lite, ViewMode::V2] {
+                assert!(seen.contains(&m), "{m:?} is unreachable from {start:?}");
+            }
+        }
+        // Lowercase does the same thing, as it does in netwatch.
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        super::handle_key(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.view, ViewMode::Lite);
+    }
+
+    #[test]
+    fn the_settings_menu_reaches_the_views_and_names_them_as_the_cli_does() {
+        // Found through the menu rather than the keybinding: the View row
+        // has to cycle the same list, and print the spelling `--lite` and
+        // `--v2` accept.
+        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        super::handle_key(&mut app, KeyCode::Char(','));
+        assert!(app.show_settings, "`,` does not open settings from 2.0");
+        let view_row = settings_rows(&app)
+            .into_iter()
+            .position(|(label, _)| label == "View")
+            .expect("a View row");
+        app.settings_cursor = view_row;
+        let before = app.view;
+        super::handle_key(&mut app, KeyCode::Enter);
+        assert_ne!(app.view, before, "the View row did not cycle");
+        assert!(app.show_settings, "the overlay closed on a cycle");
+        assert!(
+            VIEW_MODE_NAMES.contains(&app.view.name()),
+            "{} is not a spelling the CLI accepts",
+            app.view.name()
+        );
+        // And the dialog still owns the keyboard while it is open: `s`
+        // must not sort the file list behind it.
+        app.view = ViewMode::V2;
+        let sort = app.v2.sort;
+        super::handle_key(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.v2.sort, sort, "a key leaked past the open dialog");
+    }
+
+    #[test]
+    fn every_key_the_2_0_view_advertises_actually_does_something() {
+        // The view has no footer chrome: its bindings are printed in the box
+        // borders, and a border that advertises a key the handler ignores is
+        // the worst kind of documentation. This pins each one to an
+        // observable effect. It caught `↹ device`, carried over from the
+        // design handoff, which nothing had ever implemented.
+        let fresh = || App::new(TabId::Overview, ViewMode::V2);
+
+        let mut app = fresh();
+        super::handle_key(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit, "q");
+
+        let mut app = fresh();
+        super::handle_key(&mut app, KeyCode::Char('/'));
+        assert!(app.v2.filter_input, "/");
+
+        let mut app = fresh();
+        let sort = app.v2.sort;
+        super::handle_key(&mut app, KeyCode::Char('s'));
+        assert_ne!(app.v2.sort, sort, "s");
+
+        let mut app = fresh();
+        super::handle_key(&mut app, KeyCode::Char('V'));
+        assert_ne!(app.view, ViewMode::V2, "V");
+
+        let mut app = fresh();
+        super::handle_key(&mut app, KeyCode::Char(','));
+        assert!(app.show_settings, ",");
+
+        let mut app = fresh();
+        super::handle_key(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help, "?");
+
+        // ↑↓ only move when there is something to move through, which is
+        // the one case a fresh App can't guarantee — so assert the clamp
+        // instead: they must never leave the selection out of bounds.
+        let mut app = fresh();
+        super::handle_key(&mut app, KeyCode::Down);
+        super::handle_key(&mut app, KeyCode::End);
+        let count = crate::ui::v2::sorted_rows(&app).len();
+        assert!(app.v2.selected < count.max(1), "↑↓ left the list");
+    }
+
+    #[test]
+    fn v2_filter_captures_printable_keys() {
+        // `s` sorts — unless the filter is capturing, in which case it is
+        // just a letter. Getting this order wrong makes the filter
+        // unusable for anything containing an s.
+        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        super::handle_key(&mut app, KeyCode::Char('/'));
+        let sort = app.v2.sort;
+        for c in "syslog".chars() {
+            super::handle_key(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(app.v2.filter_text, "syslog");
+        assert_eq!(app.v2.sort, sort, "sort changed while typing a filter");
+        super::handle_key(&mut app, KeyCode::Esc);
+        assert!(app.v2.filter_text.is_empty());
+    }
+
+    #[test]
+    fn v2_esc_unwinds_the_filter_before_it_quits() {
+        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        app.v2.filter_text = "log".into();
+        super::handle_key(&mut app, KeyCode::Esc);
+        assert!(app.v2.filter_text.is_empty());
+        assert!(!app.should_quit);
+        super::handle_key(&mut app, KeyCode::Esc);
+        assert!(app.should_quit);
     }
 
     #[test]

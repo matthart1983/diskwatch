@@ -35,7 +35,61 @@
 | 7 | Hot Files | `fanotify`/`fseventsd` watcher (paths, not bytes) |
 | 8 | Insights | plain-English anomaly summaries |
 
+Plus two single-screen views that are not tabs: **2.0** (`--v2`, six btop-style boxes) and
+**Lite** (`--lite`, 80×24, six keys).
+
 Where `lsblk` shows you *which disks exist*, DiskWatch shows you *what's happening on them* — capacity trending, IO throughput, p99 latency, SMART health, and the files being written *right now* — and tells you why in plain English when something's anomalous.
+
+## 2.0
+
+```bash
+diskwatch --v2
+```
+
+Six boxes tile the terminal with **zero chrome rows** — no header bar, no menu bar, no
+status bar. Identity, uptime, sort state, paging and every keybind live inside the box
+borders, which a box spends anyway.
+
+```
+╭┤1├─┤ io ├─┤ 4 physical · 6 volumes ├────────────┤ diskwatch 0.2.0  nas-01  up 4d 02:18 ├─╮
+│ r 128 MB/s  read      peak 412M  avg 96M  iops 5.0k       avg req 36KB · 4 disks summed │
+│ 500M┤                        ⣠⣴⣶⣿⣿⣷⣦⣄                                                   │
+│    0┤ ⣀⣠⣤⣶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ │
+│   2m┤ ────────────────────────────┤ 60s ├───────────────────────────────────────┤ now ├ │
+│    0┤ ⠛⠛⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ │
+│ 160M┤                              ⠉⠛⠿⠟⠋                                                │
+│ w 14 MB/s  write      peak 38M   avg 11M  iops 4.3k                                      │
+│ vitals  util ■■■■■■■■········  52%  await 0.35ms  iops 9.3k    p99 4.25ms · headroom 48% │
+╰─┤ V view  , settings ├────────────────────────────┤ inflight 2 · 52% util ├─────────────╯
+```
+
+**The mirror is earned here.** In a CPU monitor a mirrored graph is decoration, because
+compute has no opposing direction. Disk read/write *is* two directions of one flow, so it
+takes the full width: a restore is a cliff above the axis, a backup a cliff below it, and a
+database at work is roughly symmetric about it.
+
+**The latency histogram is the disk-specific part.** Seven buckets from `<0.1ms` to
+`>50ms`, drawn as horizontal bars. Bar length comes from the count, but **colour comes from
+the bucket's position** — so the right-hand buckets are red even when nearly empty, and you
+learn where the tail lives before it grows. A mean of 5ms can hide a p99 of 60, and the tail
+is what you actually feel.
+
+Below 104×32 it falls back to a compact screen — the mirror and the percentiles survive,
+because they are the identity of the tool; `devices`, `volumes` and `smart` collapse to
+summary lines.
+
+`V` cycles **full → lite → 2.0 → full** from any view, the same convention as
+[netwatch](https://github.com/matthart1983/netwatch), and the View row in the `,` settings
+overlay walks the same list for anyone who finds it there first. Unlike Lite, the 2.0 view
+carries that overlay: it replaces the 8-tab view rather than deliberately reducing it, so
+the dials stay reachable without leaving. Every key it binds is printed in a box border —
+and nothing is printed that it doesn't bind.
+
+Graphs are braille: two samples per character column at four vertical levels per row, with
+the fill coloured by its height in the graph rather than by which series it belongs to.
+Axis ceilings come off each series' own measured peak, on a ladder whose rungs are at most
+25% apart — so a peak always lands in the top fifth of the axis instead of leaving the top
+braille row unused.
 
 ## Lite
 
@@ -59,7 +113,7 @@ w 14 MB/s write                                    peak 38 MB/s  avg 11 MB/s
 ```
 
 It is not the full tool with tabs hidden — it is a different view for one machine and one
-question. Toggle either direction at runtime with `L`; the full 8-tab TUI stays the default
+question. `L` jumps straight here and back, `V` cycles through all three views; the full 8-tab TUI stays the default
 at every terminal size. Below 80×24 Lite shows a notice rather than a clipped grid.
 
 Same grid, keys and palette as [`netwatch --lite`](https://github.com/matthart1983/netwatch)
@@ -116,11 +170,16 @@ cargo build --release
 | `1`–`8` | Switch tabs |
 | `↑` / `↓` / `j` / `k` | Move selection (Devices, FS) |
 | `p` | Pause / resume sampling |
-| `,` | Settings (columns, temperature unit, SMART interval, theme) |
-| `L` | Switch between the full TUI and Lite |
+| `,` | Settings (columns, temperature unit, SMART interval, theme, view) |
+| `V` | Cycle view: full → lite → 2.0 → full |
+| `L` | Jump straight to Lite |
+| `s` | Cycle the file sort (2.0 only) |
+| `/` | Filter files by name or path (Lite, 2.0) |
 | `?` | Help |
 | `q` / `Esc` | Quit |
 | `--lite` | Start in the minimal single-screen view |
+| `--v2` | Start in the 2.0 six-box screen (alias `--btop`) |
+| `--view` | Start in a named view: `full`, `lite`, `v2` |
 | `--graph` | `bars` (default) or `dots` for btop-style braille |
 | `--graph-fade` | btop's brightness gradient + dot grid |
 | `--diag` | Print collected state and exit (no TUI) |
@@ -197,7 +256,10 @@ Lite has no settings overlay of its own — press `L`, change it, press `L` back
 | Read/write byte rates (split) | ✅ IOKit `Statistics` | ✅ `/proc/diskstats` cols 5/9 |
 | Avg per-op latency | ✅ `Total Time / Operations` | ✅ `/proc/diskstats` cols 6/10 |
 | p50 / p99 latency | ✅ tick-averaged over 60s | ✅ tick-averaged over 60s |
+| Latency histogram (7 buckets) | ✅ tick means weighted by ops | ✅ tick means weighted by ops |
 | True per-op p99 (histogram) | ❌ needs IOReport entitlement | ❌ needs eBPF biolatency (CAP_BPF) |
+| Read/write **iops**, split | ✅ IOKit `Operations` | ✅ `/proc/diskstats` cols 4/8 |
+| Device utilisation (%util) | ❌ IOKit counts service time, not busy time | ✅ `/proc/diskstats` col 13 (`io_ticks`) |
 | SMART attributes | ✅ `smartctl` if installed | ✅ `smartctl` if installed |
 | Volumes — APFS | ✅ `diskutil apfs list` | n/a |
 | Volumes — mdraid | n/a | ✅ `/proc/mdstat` |
@@ -205,7 +267,19 @@ Lite has no settings overlay of its own — press `L`, change it, press `L` back
 | Hot files (paths) | ✅ FSEvents | ✅ inotify |
 | Hot files — bytes / pid | ❌ needs root `fs_usage` / entitlement | ❌ needs eBPF biosnoop |
 | Capacity growth + time-to-full | ✅ 10-min usage window | ✅ 10-min usage window |
-| Aggregate queue depth | ❌ not exposed by IOKit | ⏳ `/proc/diskstats` col 12, deferred |
+| Requests in flight | ❌ not exposed by IOKit | ✅ `/proc/diskstats` col 12 |
+
+The 2.0 view renders `--` for anything the platform can't measure and keeps the column, so
+the layout never shifts between machines. Utilisation is the one that matters: macOS has no
+time-with-IO-in-flight counter, only summed service time, which on a deep-queue NVMe exceeds
+wall clock and would read as a permanent 100%. Rather than print that, the devices table
+sorts by throughput there — and says `sort ↓ throughput` in its own border, so the indicator
+can never advertise a sort that didn't happen.
+
+Its latency histogram is honest about its resolution too: each 200ms sample contributes its
+whole op count to the bucket containing that sample's *mean* service time. It will show a
+sustained slow stretch; it will smear a single 50ms outlier into whatever its tick averaged.
+That is why the box is subtitled `io completion · sampled`.
 
 ## Design
 

@@ -41,6 +41,19 @@ struct Cli {
     #[arg(long)]
     lite: bool,
 
+    /// Start in the 2.0 view: six btop-style boxes tiling the screen with
+    /// zero chrome rows — a mirrored read/write graph, per-device table,
+    /// latency histogram, capacity, SMART and hot files, all at once.
+    /// Cycle views at runtime with `V`.
+    #[arg(long, alias = "btop")]
+    v2: bool,
+
+    /// Start in a named view: "full" (default), "lite" or "v2". The same
+    /// spellings the settings overlay's View row shows, and the same list
+    /// `V` cycles through at runtime.
+    #[arg(long, value_parser = parse_view)]
+    view: Option<String>,
+
     /// Print collected state and exit without launching the TUI.
     /// Useful for diagnosing what each collector is seeing.
     #[arg(long)]
@@ -76,6 +89,20 @@ fn parse_graph(raw: &str) -> Result<String, String> {
     Ok(raw.to_string())
 }
 
+/// Same reasoning as [`parse_theme`]: reject an unknown view at the CLI
+/// rather than falling back to the default, which would look like the flag
+/// did nothing.
+fn parse_view(raw: &str) -> Result<String, String> {
+    app::ViewMode::from_name(raw)
+        .map(|_| raw.to_string())
+        .ok_or_else(|| {
+            format!(
+                "unknown view {raw:?} (available: {})",
+                app::VIEW_MODE_NAMES.join(", ")
+            )
+        })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.diag {
@@ -86,9 +113,24 @@ fn main() -> Result<()> {
     ui::theme::set_by_name(&cli.theme);
     ui::graph::set_by_name(&cli.graph);
     ui::graph::set_fade(cli.graph_fade);
+    // Precedence: an explicit --view wins, then the two shorthand flags.
+    // --v2 beats --lite when both are passed — it is the more specific
+    // request, and honouring the other silently would look like the flag
+    // did nothing.
+    let view = cli
+        .view
+        .as_deref()
+        .and_then(app::ViewMode::from_name)
+        .unwrap_or(if cli.v2 {
+            app::ViewMode::V2
+        } else if cli.lite {
+            app::ViewMode::Lite
+        } else {
+            app::ViewMode::Full
+        });
     app::run(app::Options {
         start_tab: cli.tab,
-        lite: cli.lite,
+        view,
     })
 }
 
