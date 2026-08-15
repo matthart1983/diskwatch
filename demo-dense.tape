@@ -1,4 +1,4 @@
-# demo-v2.tape — the 2.0 view.
+# demo-dense.tape — the Dense view.
 #
 # Recorded against real disk traffic (a burst generator writing and syncing in
 # the background), so every figure on screen is measured rather than staged.
@@ -7,7 +7,7 @@
 # show a tool that has only just been launched — but it makes a poor first
 # frame, so the recording starts once the ring has something to say.
 
-Output demo-v2.gif
+Output demo-dense.gif
 
 Set Shell "bash"
 Set FontSize 14
@@ -24,7 +24,7 @@ Set Padding 10
 # the recording at the next keypress. `z` is a no-op in this view, so the
 # connection stays warm and the app sees nothing.
 Hide
-Type "./target/release/diskwatch --v2"
+Type "./target/release/diskwatch --dense"
 Enter
 Sleep 12s
 Type "z"
@@ -72,7 +72,7 @@ Sleep 3s
 Escape
 Sleep 1s
 
-# [6] `V` cycles full -> lite -> 2.0, netwatch's convention.
+# [6] `V` cycles full -> lite -> dense, netwatch's convention.
 Type "V"
 Sleep 5s
 Type "V"

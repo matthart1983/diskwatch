@@ -41,14 +41,18 @@ struct Cli {
     #[arg(long)]
     lite: bool,
 
-    /// Start in the 2.0 view: six btop-style boxes tiling the screen with
+    /// Start in the dense view: six btop-style boxes tiling the screen with
     /// zero chrome rows — a mirrored read/write graph, per-device table,
     /// latency histogram, capacity, SMART and hot files, all at once.
     /// Cycle views at runtime with `V`.
-    #[arg(long, alias = "btop")]
-    v2: bool,
+    ///
+    /// `--v2` and `--btop` are kept as hidden aliases: they are what this
+    /// view was called in v0.2.x, and a flag that worked yesterday should not
+    /// fail today just because it was renamed.
+    #[arg(long, alias = "v2", alias = "btop")]
+    dense: bool,
 
-    /// Start in a named view: "full" (default), "lite" or "v2". The same
+    /// Start in a named view: "full" (default), "lite" or "dense". The same
     /// spellings the settings overlay's View row shows, and the same list
     /// `V` cycles through at runtime.
     #[arg(long, value_parser = parse_view)]
@@ -114,15 +118,15 @@ fn main() -> Result<()> {
     ui::graph::set_by_name(&cli.graph);
     ui::graph::set_fade(cli.graph_fade);
     // Precedence: an explicit --view wins, then the two shorthand flags.
-    // --v2 beats --lite when both are passed — it is the more specific
+    // --dense beats --lite when both are passed — it is the more specific
     // request, and honouring the other silently would look like the flag
     // did nothing.
     let view = cli
         .view
         .as_deref()
         .and_then(app::ViewMode::from_name)
-        .unwrap_or(if cli.v2 {
-            app::ViewMode::V2
+        .unwrap_or(if cli.dense {
+            app::ViewMode::Dense
         } else if cli.lite {
             app::ViewMode::Lite
         } else {

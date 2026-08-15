@@ -39,20 +39,22 @@ pub struct Options {
     pub view: ViewMode,
 }
 
-/// Which view is on screen. Lite and V2 are modes, not tabs: each has
+/// Which view is on screen. Lite and Dense are modes, not tabs: each has
 /// its own key surface and its own layout contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Full,
     Lite,
-    /// The 2.0 screen: six btop-style boxes, zero chrome rows.
-    V2,
+    /// The dense screen: six btop-style boxes, zero chrome rows. Named to
+    /// match netwatch's equivalent view, so the vocabulary carries across the
+    /// family along with the `V` that cycles it.
+    Dense,
 }
 
 /// Config / CLI spellings, in cycle order. `V` walks this list, and the
 /// settings overlay's View row shows the current entry. Same convention as
 /// netwatch, so the muscle memory carries between the two tools.
-pub const VIEW_MODE_NAMES: &[&str] = &["full", "lite", "v2"];
+pub const VIEW_MODE_NAMES: &[&str] = &["full", "lite", "dense"];
 
 impl ViewMode {
     /// Resolve a config / CLI spelling. `None` for anything not in
@@ -62,7 +64,9 @@ impl ViewMode {
         match name.to_ascii_lowercase().as_str() {
             "full" => Some(ViewMode::Full),
             "lite" => Some(ViewMode::Lite),
-            "v2" | "btop" | "2.0" => Some(ViewMode::V2),
+            // `v2` and `btop` are what this view was called in v0.2.x. Kept
+            // so a script or a shell history from then still resolves.
+            "dense" | "v2" | "btop" | "2.0" => Some(ViewMode::Dense),
             _ => None,
         }
     }
@@ -71,22 +75,22 @@ impl ViewMode {
         match self {
             ViewMode::Full => "full",
             ViewMode::Lite => "lite",
-            ViewMode::V2 => "v2",
+            ViewMode::Dense => "dense",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             ViewMode::Full => ViewMode::Lite,
-            ViewMode::Lite => ViewMode::V2,
-            ViewMode::V2 => ViewMode::Full,
+            ViewMode::Lite => ViewMode::Dense,
+            ViewMode::Dense => ViewMode::Full,
         }
     }
 }
 
 /// Advance to the next view, from whichever view is asking.
 ///
-/// Each view owns its own transient state — Lite's detail pane, the 2.0
+/// Each view owns its own transient state — Lite's detail pane, the dense
 /// view's filter capture — and leaving a view has to close it, or it
 /// reopens against a different selection when the cycle comes back around.
 fn cycle_view(app: &mut App) {
@@ -94,8 +98,8 @@ fn cycle_view(app: &mut App) {
     if app.view != ViewMode::Lite {
         app.lite.detail_open = false;
     }
-    if app.view != ViewMode::V2 {
-        app.v2.filter_input = false;
+    if app.view != ViewMode::Dense {
+        app.dense.filter_input = false;
     }
 }
 
@@ -176,9 +180,9 @@ pub struct App {
     /// Lite's selection / filter / detail state. Persists across a
     /// round trip to the full TUI and back.
     pub lite: crate::ui::lite::LiteState,
-    /// The 2.0 view's selection / filter / sort state. Persists across a
+    /// The dense view's selection / filter / sort state. Persists across a
     /// round trip to another view and back, same as Lite's.
-    pub v2: crate::ui::v2::V2State,
+    pub dense: crate::ui::dense::DenseState,
     /// Last drawn area, so the key handler can ask the Lite layout how
     /// many rows are visible without a frame in hand.
     pub last_area: Rect,
@@ -251,7 +255,7 @@ impl App {
             active_tab: start,
             view,
             lite: crate::ui::lite::LiteState::default(),
-            v2: crate::ui::v2::V2State::default(),
+            dense: crate::ui::dense::DenseState::default(),
             last_area: Rect::new(0, 0, 0, 0),
             live: LiveState::Live,
             host: read_host(devices.len()),
@@ -381,7 +385,7 @@ fn main_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
 fn handle_key(app: &mut App, key: KeyCode) {
     // The settings overlay is shared by every view that offers it, so it
     // claims the keyboard before any view-specific handler — otherwise the
-    // 2.0 view's `s` would sort the file list behind an open dialog.
+    // dense view's `s` would sort the file list behind an open dialog.
     if app.show_settings && !app.show_help {
         handle_settings_key(app, key);
         return;
@@ -395,8 +399,8 @@ fn handle_key(app: &mut App, key: KeyCode) {
         handle_lite_key(app, key);
         return;
     }
-    if app.view == ViewMode::V2 && !app.show_help {
-        handle_v2_key(app, key);
+    if app.view == ViewMode::Dense && !app.show_help {
+        handle_dense_key(app, key);
         return;
     }
 
@@ -444,7 +448,7 @@ fn handle_key(app: &mut App, key: KeyCode) {
         // is already the vim-style right/selection key.
         KeyCode::Char('L') => app.view = ViewMode::Lite,
 
-        // `V` cycles full → lite → 2.0 → full, netwatch's convention.
+        // `V` cycles full → lite → dense → full, netwatch's convention.
         // `L` above stays as the direct jump to Lite.
         KeyCode::Char('v') | KeyCode::Char('V') => cycle_view(app),
 
@@ -621,55 +625,55 @@ fn handle_lite_key(app: &mut App, key: KeyCode) {
     clamp_lite_scroll(app, count, visible);
 }
 
-/// Keys for the 2.0 view.
+/// Keys for the dense view.
 ///
 /// It owns its whole key surface for the same reason Lite does: the
 /// 8-tab view's tab cycling and digit jumps have no meaning against six
 /// boxes, and letting them through would mutate state the user can't
 /// see. Everything it does bind is advertised in a box border.
-fn handle_v2_key(app: &mut App, key: KeyCode) {
-    use crate::ui::v2;
+fn handle_dense_key(app: &mut App, key: KeyCode) {
+    use crate::ui::dense;
 
     // Filter input swallows printable keys, so it is checked before
     // anything that binds a letter.
-    if app.v2.filter_input {
+    if app.dense.filter_input {
         match key {
             KeyCode::Esc => {
-                app.v2.filter_input = false;
-                app.v2.filter_text.clear();
-                app.v2.selected = 0;
-                app.v2.offset = 0;
+                app.dense.filter_input = false;
+                app.dense.filter_text.clear();
+                app.dense.selected = 0;
+                app.dense.offset = 0;
             }
-            KeyCode::Enter => app.v2.filter_input = false,
+            KeyCode::Enter => app.dense.filter_input = false,
             KeyCode::Backspace => {
-                app.v2.filter_text.pop();
-                app.v2.selected = 0;
-                app.v2.offset = 0;
+                app.dense.filter_text.pop();
+                app.dense.selected = 0;
+                app.dense.offset = 0;
             }
             KeyCode::Char(c) => {
-                app.v2.filter_text.push(c);
-                app.v2.selected = 0;
-                app.v2.offset = 0;
+                app.dense.filter_text.push(c);
+                app.dense.selected = 0;
+                app.dense.offset = 0;
             }
             _ => {}
         }
         return;
     }
 
-    let count = v2::sorted_rows(app).len();
-    let visible = v2::visible_files(app.last_area);
+    let count = dense::sorted_rows(app).len();
+    let visible = dense::visible_files(app.last_area);
 
     match key {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('v') | KeyCode::Char('V') => {
-            app.v2.filter_input = false;
+            app.dense.filter_input = false;
             cycle_view(app);
         }
         KeyCode::Char('L') => {
             app.view = ViewMode::Lite;
-            app.v2.filter_input = false;
+            app.dense.filter_input = false;
         }
-        // The 2.0 view carries the settings overlay, unlike Lite: it is a
+        // The dense view carries the settings overlay, unlike Lite: it is a
         // whole-screen replacement for the 8-tab view rather than a
         // deliberately six-key one, so the dials have to be reachable
         // without leaving it.
@@ -685,36 +689,36 @@ fn handle_v2_key(app: &mut App, key: KeyCode) {
             };
         }
         KeyCode::Char('/') => {
-            app.v2.filter_input = true;
-            app.v2.filter_text.clear();
+            app.dense.filter_input = true;
+            app.dense.filter_text.clear();
         }
-        KeyCode::Char('s') => app.v2.sort = app.v2.sort.next(),
+        KeyCode::Char('s') => app.dense.sort = app.dense.sort.next(),
         KeyCode::Esc => {
-            if !app.v2.filter_text.is_empty() {
-                app.v2.filter_text.clear();
-                app.v2.selected = 0;
-                app.v2.offset = 0;
+            if !app.dense.filter_text.is_empty() {
+                app.dense.filter_text.clear();
+                app.dense.selected = 0;
+                app.dense.offset = 0;
             } else {
                 app.should_quit = true;
             }
         }
         KeyCode::Down | KeyCode::Char('j') if count > 0 => {
-            app.v2.selected = (app.v2.selected + 1).min(count - 1);
+            app.dense.selected = (app.dense.selected + 1).min(count - 1);
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.v2.selected = app.v2.selected.saturating_sub(1);
+            app.dense.selected = app.dense.selected.saturating_sub(1);
         }
-        KeyCode::Home => app.v2.selected = 0,
-        KeyCode::End => app.v2.selected = count.saturating_sub(1),
+        KeyCode::Home => app.dense.selected = 0,
+        KeyCode::End => app.dense.selected = count.saturating_sub(1),
         _ => {}
     }
 
-    clamp_v2_scroll(app, count, visible);
+    clamp_dense_scroll(app, count, visible);
 }
 
 /// Keep the selection inside the file box's visible window.
-fn clamp_v2_scroll(app: &mut App, count: usize, visible: u16) {
-    let st = &mut app.v2;
+fn clamp_dense_scroll(app: &mut App, count: usize, visible: u16) {
+    let st = &mut app.dense;
     if count == 0 || visible == 0 {
         st.selected = 0;
         st.offset = 0;
@@ -944,16 +948,16 @@ fn draw_inner(f: &mut ratatui::Frame, app: &App) {
         return;
     }
 
-    // The 2.0 view goes further: its boxes tile every row, and the
+    // The dense view goes further: its boxes tile every row, and the
     // identity, hotkeys and paging that would need chrome live inside
     // the borders instead.
-    if app.view == ViewMode::V2 {
-        crate::ui::v2::render(f, full, app);
+    if app.view == ViewMode::Dense {
+        crate::ui::dense::render(f, full, app);
         if app.show_settings {
             draw_settings_overlay(f, full, app);
         }
         if app.show_help {
-            draw_v2_help_overlay(f, full);
+            draw_dense_help_overlay(f, full);
         }
         return;
     }
@@ -1059,7 +1063,7 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume live updates")]),
         Line::from(vec![key("L"), desc("switch to Lite — one 80×24 screen")]),
-        Line::from(vec![key("V"), desc("cycle view: full → lite → 2.0")]),
+        Line::from(vec![key("V"), desc("cycle view: full → lite → dense")]),
         Line::from(vec![key("?"), desc("toggle this help")]),
         Line::from(vec![
             key(","),
@@ -1130,7 +1134,7 @@ fn draw_lite_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(vec![key("Home End"), desc("first / last row")]),
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume")]),
-        Line::from(vec![key("V"), desc("cycle view: full → lite → 2.0")]),
+        Line::from(vec![key("V"), desc("cycle view: full → lite → dense")]),
         Line::from(vec![key("L"), desc("back to the full 8-tab view")]),
         Line::from(vec![key("q"), desc("quit")]),
         Line::from(""),
@@ -1152,7 +1156,7 @@ fn draw_lite_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_v2_help_overlay(f: &mut ratatui::Frame, area: Rect) {
+fn draw_dense_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     use ratatui::style::Modifier;
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -1176,7 +1180,7 @@ fn draw_v2_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::cyan()))
         .title(Span::styled(
-            " DiskWatch 2.0 — key bindings ",
+            " DiskWatch Dense — key bindings ",
             Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(p::bg()));
@@ -1199,7 +1203,7 @@ fn draw_v2_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::from(vec![key("Home End"), desc("first / last row")]),
         Line::from(""),
         Line::from(vec![key("p"), desc("pause / resume")]),
-        Line::from(vec![key("V"), desc("cycle view: full → lite → 2.0")]),
+        Line::from(vec![key("V"), desc("cycle view: full → lite → dense")]),
         Line::from(vec![key("L"), desc("jump straight to Lite")]),
         Line::from(vec![key(","), desc("settings (theme, view, graphs)")]),
         Line::from(vec![key("q"), desc("quit")]),
@@ -1294,7 +1298,7 @@ fn settings_rows(app: &App) -> Vec<(&'static str, String)> {
             crate::ui::theme::name().to_string(),
         ),
         // Value is the bare name, matching `VIEW_MODE_NAMES` and the
-        // `--lite` / `--v2` flags, so what the menu says is what the CLI
+        // `--lite` / `--dense` flags, so what the menu says is what the CLI
         // takes. `V` walks the same list.
         ("View", app.view.name().to_string()),
         ("Graph style", crate::ui::graph::name().to_string()),
@@ -1572,47 +1576,53 @@ mod tests {
         }
     }
 
-    /// Draw the 2.0 view in every state it can be in, at one size.
-    fn render_v2(width: u16, height: u16) {
+    /// Draw the dense view in every state it can be in, at one size.
+    fn render_dense(width: u16, height: u16) {
         let backend = TestBackend::new(width, height);
         let mut term = Terminal::new(backend).expect("terminal");
-        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        let mut app = App::new(TabId::Overview, ViewMode::Dense);
         app.growth.observe(&app.filesystems);
         app.io.sample();
 
         for (filter, filtering, sort, help) in [
-            ("", false, crate::ui::v2::FileSort::Rate, false),
-            ("", false, crate::ui::v2::FileSort::Total, false),
-            ("", false, crate::ui::v2::FileSort::Name, false),
-            ("log", false, crate::ui::v2::FileSort::Rate, false),
-            ("lo", true, crate::ui::v2::FileSort::Rate, false),
-            ("", false, crate::ui::v2::FileSort::Rate, true),
+            ("", false, crate::ui::dense::FileSort::Rate, false),
+            ("", false, crate::ui::dense::FileSort::Total, false),
+            ("", false, crate::ui::dense::FileSort::Name, false),
+            ("log", false, crate::ui::dense::FileSort::Rate, false),
+            ("lo", true, crate::ui::dense::FileSort::Rate, false),
+            ("", false, crate::ui::dense::FileSort::Rate, true),
         ] {
-            app.v2.filter_text = filter.to_string();
-            app.v2.filter_input = filtering;
-            app.v2.sort = sort;
+            app.dense.filter_text = filter.to_string();
+            app.dense.filter_input = filtering;
+            app.dense.sort = sort;
             app.show_help = help;
             term.draw(|f| super::draw(f, &mut app)).expect("draw");
         }
     }
 
     #[test]
-    fn v2_renders_at_the_reference_grid() {
+    fn dense_renders_at_the_reference_grid() {
         // The design grid: 130×44.
-        render_v2(130, 44);
+        render_dense(130, 44);
     }
 
     #[test]
-    fn v2_renders_across_the_sizes_a_terminal_actually_takes() {
+    fn dense_renders_across_the_sizes_a_terminal_actually_takes() {
         // Both sides of every layout threshold, including one column and
         // one row below each — where a saturating_sub would underflow into
         // a huge width and a box would try to draw off-screen.
         for (w, h) in [
-            (crate::ui::v2::MIN_FULL_W, crate::ui::v2::MIN_FULL_H),
-            (crate::ui::v2::MIN_FULL_W - 1, crate::ui::v2::MIN_FULL_H),
-            (crate::ui::v2::MIN_FULL_W, crate::ui::v2::MIN_FULL_H - 1),
-            (crate::ui::v2::MIN_W, crate::ui::v2::MIN_H),
-            (crate::ui::v2::MIN_W - 1, crate::ui::v2::MIN_H - 1),
+            (crate::ui::dense::MIN_FULL_W, crate::ui::dense::MIN_FULL_H),
+            (
+                crate::ui::dense::MIN_FULL_W - 1,
+                crate::ui::dense::MIN_FULL_H,
+            ),
+            (
+                crate::ui::dense::MIN_FULL_W,
+                crate::ui::dense::MIN_FULL_H - 1,
+            ),
+            (crate::ui::dense::MIN_W, crate::ui::dense::MIN_H),
+            (crate::ui::dense::MIN_W - 1, crate::ui::dense::MIN_H - 1),
             (200, 60),
             (400, 100),
             (80, 24),
@@ -1620,28 +1630,28 @@ mod tests {
             (60, 16),
             (20, 6),
         ] {
-            render_v2(w, h);
+            render_dense(w, h);
         }
     }
 
     #[test]
-    fn v2_key_surface_does_not_leak_into_the_full_tui() {
+    fn dense_key_surface_does_not_leak_into_the_full_tui() {
         // Same contract as Lite: a stray `3` must not switch a tab the
         // view doesn't show, and `s` must sort rather than do nothing.
-        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        let mut app = App::new(TabId::Overview, ViewMode::Dense);
         super::handle_key(&mut app, KeyCode::Char('3'));
         assert_eq!(app.active_tab, TabId::Overview);
-        let before = app.v2.sort;
+        let before = app.dense.sort;
         super::handle_key(&mut app, KeyCode::Char('s'));
-        assert_ne!(app.v2.sort, before);
+        assert_ne!(app.dense.sort, before);
     }
 
     #[test]
     fn v_cycles_every_view_and_returns_to_where_it_started() {
-        // netwatch's convention: one key walks full → lite → 2.0 → full,
+        // netwatch's convention: one key walks full → lite → dense → full,
         // from whichever view is on screen. `L` stays as the direct jump to
         // Lite, and the cycle has to come home or a view becomes a trap.
-        for start in [ViewMode::Full, ViewMode::Lite, ViewMode::V2] {
+        for start in [ViewMode::Full, ViewMode::Lite, ViewMode::Dense] {
             let mut app = App::new(TabId::Overview, start);
             let mut seen = vec![app.view];
             for _ in 0..VIEW_MODE_NAMES.len() {
@@ -1654,7 +1664,7 @@ mod tests {
                 VIEW_MODE_NAMES.len(),
                 "the cycle skipped a view"
             );
-            for m in [ViewMode::Full, ViewMode::Lite, ViewMode::V2] {
+            for m in [ViewMode::Full, ViewMode::Lite, ViewMode::Dense] {
                 assert!(seen.contains(&m), "{m:?} is unreachable from {start:?}");
             }
         }
@@ -1668,10 +1678,10 @@ mod tests {
     fn the_settings_menu_reaches_the_views_and_names_them_as_the_cli_does() {
         // Found through the menu rather than the keybinding: the View row
         // has to cycle the same list, and print the spelling `--lite` and
-        // `--v2` accept.
-        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        // `--dense` accept.
+        let mut app = App::new(TabId::Overview, ViewMode::Dense);
         super::handle_key(&mut app, KeyCode::Char(','));
-        assert!(app.show_settings, "`,` does not open settings from 2.0");
+        assert!(app.show_settings, "`,` does not open settings from dense");
         let view_row = settings_rows(&app)
             .into_iter()
             .position(|(label, _)| label == "View")
@@ -1688,10 +1698,10 @@ mod tests {
         );
         // And the dialog still owns the keyboard while it is open: `s`
         // must not sort the file list behind it.
-        app.view = ViewMode::V2;
-        let sort = app.v2.sort;
+        app.view = ViewMode::Dense;
+        let sort = app.dense.sort;
         super::handle_key(&mut app, KeyCode::Char('s'));
-        assert_eq!(app.v2.sort, sort, "a key leaked past the open dialog");
+        assert_eq!(app.dense.sort, sort, "a key leaked past the open dialog");
     }
 
     #[test]
@@ -1701,7 +1711,7 @@ mod tests {
         // the worst kind of documentation. This pins each one to an
         // observable effect. It caught `↹ device`, carried over from the
         // design handoff, which nothing had ever implemented.
-        let fresh = || App::new(TabId::Overview, ViewMode::V2);
+        let fresh = || App::new(TabId::Overview, ViewMode::Dense);
 
         let mut app = fresh();
         super::handle_key(&mut app, KeyCode::Char('q'));
@@ -1709,16 +1719,16 @@ mod tests {
 
         let mut app = fresh();
         super::handle_key(&mut app, KeyCode::Char('/'));
-        assert!(app.v2.filter_input, "/");
+        assert!(app.dense.filter_input, "/");
 
         let mut app = fresh();
-        let sort = app.v2.sort;
+        let sort = app.dense.sort;
         super::handle_key(&mut app, KeyCode::Char('s'));
-        assert_ne!(app.v2.sort, sort, "s");
+        assert_ne!(app.dense.sort, sort, "s");
 
         let mut app = fresh();
         super::handle_key(&mut app, KeyCode::Char('V'));
-        assert_ne!(app.view, ViewMode::V2, "V");
+        assert_ne!(app.view, ViewMode::Dense, "V");
 
         let mut app = fresh();
         super::handle_key(&mut app, KeyCode::Char(','));
@@ -1734,33 +1744,33 @@ mod tests {
         let mut app = fresh();
         super::handle_key(&mut app, KeyCode::Down);
         super::handle_key(&mut app, KeyCode::End);
-        let count = crate::ui::v2::sorted_rows(&app).len();
-        assert!(app.v2.selected < count.max(1), "↑↓ left the list");
+        let count = crate::ui::dense::sorted_rows(&app).len();
+        assert!(app.dense.selected < count.max(1), "↑↓ left the list");
     }
 
     #[test]
-    fn v2_filter_captures_printable_keys() {
+    fn dense_filter_captures_printable_keys() {
         // `s` sorts — unless the filter is capturing, in which case it is
         // just a letter. Getting this order wrong makes the filter
         // unusable for anything containing an s.
-        let mut app = App::new(TabId::Overview, ViewMode::V2);
+        let mut app = App::new(TabId::Overview, ViewMode::Dense);
         super::handle_key(&mut app, KeyCode::Char('/'));
-        let sort = app.v2.sort;
+        let sort = app.dense.sort;
         for c in "syslog".chars() {
             super::handle_key(&mut app, KeyCode::Char(c));
         }
-        assert_eq!(app.v2.filter_text, "syslog");
-        assert_eq!(app.v2.sort, sort, "sort changed while typing a filter");
+        assert_eq!(app.dense.filter_text, "syslog");
+        assert_eq!(app.dense.sort, sort, "sort changed while typing a filter");
         super::handle_key(&mut app, KeyCode::Esc);
-        assert!(app.v2.filter_text.is_empty());
+        assert!(app.dense.filter_text.is_empty());
     }
 
     #[test]
-    fn v2_esc_unwinds_the_filter_before_it_quits() {
-        let mut app = App::new(TabId::Overview, ViewMode::V2);
-        app.v2.filter_text = "log".into();
+    fn dense_esc_unwinds_the_filter_before_it_quits() {
+        let mut app = App::new(TabId::Overview, ViewMode::Dense);
+        app.dense.filter_text = "log".into();
         super::handle_key(&mut app, KeyCode::Esc);
-        assert!(app.v2.filter_text.is_empty());
+        assert!(app.dense.filter_text.is_empty());
         assert!(!app.should_quit);
         super::handle_key(&mut app, KeyCode::Esc);
         assert!(app.should_quit);

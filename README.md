@@ -13,42 +13,25 @@
 </p>
 
 <p align="center">
-  <em>Sibling to <a href="https://github.com/matthart1983/netwatch">NetWatch</a> and <a href="https://github.com/matthart1983/syswatch">SysWatch</a>. Same chrome. Same palette. Eight tabs covering every disk on one box.</em>
+  <em>Sibling to <a href="https://github.com/matthart1983/netwatch">NetWatch</a> and <a href="https://github.com/matthart1983/syswatch">SysWatch</a>. Same chrome. Same palette. One dense screen, or eight tabs, covering every disk on one box.</em>
 </p>
 
 <p align="center">
-  <img src="demo.gif" alt="DiskWatch — Overview, Devices, Volumes, FS, IO, SMART, Hot Files, Insights" width="800">
+  <img src="demo-dense.gif" alt="DiskWatch Dense — six boxes on one screen, recorded against real disk traffic" width="800">
 </p>
 
 ---
 
-## What it shows
-
-| # | Tab | Replaces |
-|---|---|---|
-| 1 | Overview | one screen across capacity, IO, health, hot files |
-| 2 | Devices | `lsblk`, `nvme list`, `diskutil list`, `hdparm -I` |
-| 3 | Volumes | `lvs` + `vgs`, `mdadm --detail`, `diskutil apfs list` |
-| 4 | FS | `df -h`, `df -i`, `mount`, `findmnt` |
-| 5 | IO | `iostat -x 1`, biolatency-style averages |
-| 6 | SMART | `smartctl -A`, `nvme smart-log` |
-| 7 | Hot Files | `fanotify`/`fseventsd` watcher (paths, not bytes) |
-| 8 | Insights | plain-English anomaly summaries |
-
-Plus two single-screen views that are not tabs: **2.0** (`--v2`, six btop-style boxes) and
-**Lite** (`--lite`, 80×24, six keys).
-
-Where `lsblk` shows you *which disks exist*, DiskWatch shows you *what's happening on them* — capacity trending, IO throughput, p99 latency, SMART health, and the files being written *right now* — and tells you why in plain English when something's anomalous.
-
-## 2.0
+## Dense
 
 ```bash
-diskwatch --v2
+diskwatch --dense
 ```
 
-<p align="center">
-  <img src="demo-v2.gif" alt="DiskWatch 2.0 — the six-box screen, recorded against real disk traffic" width="800">
-</p>
+Everything about one machine's disks, at once: throughput, per-device rates, IO latency
+distribution, capacity with a time-to-full projection, drive health, and the files being
+written right now. Where `lsblk` tells you *which disks exist*, this tells you *what is
+happening on them* — and it fits in one screen you can leave open on a second monitor.
 
 Six boxes tile the terminal with **zero chrome rows** — no header bar, no menu bar, no
 status bar. Identity, uptime, sort state, paging and every keybind live inside the box
@@ -82,9 +65,9 @@ Below 104×32 it falls back to a compact screen — the mirror and the percentil
 because they are the identity of the tool; `devices`, `volumes` and `smart` collapse to
 summary lines.
 
-`V` cycles **full → lite → 2.0 → full** from any view, the same convention as
+`V` cycles **full → lite → dense → full** from any view, the same convention and the same name as
 [netwatch](https://github.com/matthart1983/netwatch), and the View row in the `,` settings
-overlay walks the same list for anyone who finds it there first. Unlike Lite, the 2.0 view
+overlay walks the same list for anyone who finds it there first. Unlike Lite, Dense
 carries that overlay: it replaces the 8-tab view rather than deliberately reducing it, so
 the dials stay reachable without leaving. Every key it binds is printed in a box border —
 and nothing is printed that it doesn't bind.
@@ -94,6 +77,29 @@ the fill coloured by its height in the graph rather than by which series it belo
 Axis ceilings come off each series' own measured peak, on a ladder whose rungs are at most
 25% apart — so a peak always lands in the top fifth of the axis instead of leaving the top
 braille row unused.
+
+---
+
+## What it shows
+
+<p align="center">
+  <img src="demo.gif" alt="DiskWatch — Overview, Devices, Volumes, FS, IO, SMART, Hot Files, Insights" width="800">
+</p>
+
+| # | Tab | Replaces |
+|---|---|---|
+| 1 | Overview | one screen across capacity, IO, health, hot files |
+| 2 | Devices | `lsblk`, `nvme list`, `diskutil list`, `hdparm -I` |
+| 3 | Volumes | `lvs` + `vgs`, `mdadm --detail`, `diskutil apfs list` |
+| 4 | FS | `df -h`, `df -i`, `mount`, `findmnt` |
+| 5 | IO | `iostat -x 1`, biolatency-style averages |
+| 6 | SMART | `smartctl -A`, `nvme smart-log` |
+| 7 | Hot Files | `fanotify`/`fseventsd` watcher (paths, not bytes) |
+| 8 | Insights | plain-English anomaly summaries |
+
+When you want to drill rather than watch, the eight tabs are the same data with room to
+breathe — every column, every SMART attribute, every mount. Insights turns the anomalies
+into the sentence you were going to write in the incident channel anyway.
 
 ## Lite
 
@@ -175,15 +181,15 @@ cargo build --release
 | `↑` / `↓` / `j` / `k` | Move selection (Devices, FS) |
 | `p` | Pause / resume sampling |
 | `,` | Settings (columns, temperature unit, SMART interval, theme, view) |
-| `V` | Cycle view: full → lite → 2.0 → full |
+| `V` | Cycle view: full → lite → dense → full |
 | `L` | Jump straight to Lite |
-| `s` | Cycle the file sort (2.0 only) |
-| `/` | Filter files by name or path (Lite, 2.0) |
+| `s` | Cycle the file sort (Dense only) |
+| `/` | Filter files by name or path (Lite, Dense) |
 | `?` | Help |
 | `q` / `Esc` | Quit |
 | `--lite` | Start in the minimal single-screen view |
-| `--v2` | Start in the 2.0 six-box screen (alias `--btop`) |
-| `--view` | Start in a named view: `full`, `lite`, `v2` |
+| `--dense` | Start in the Dense six-box view (`--v2` and `--btop` still work) |
+| `--view` | Start in a named view: `full`, `lite`, `dense` |
 | `--graph` | `bars` (default) or `dots` for btop-style braille |
 | `--graph-fade` | btop's brightness gradient + dot grid |
 | `--diag` | Print collected state and exit (no TUI) |
@@ -273,7 +279,7 @@ Lite has no settings overlay of its own — press `L`, change it, press `L` back
 | Capacity growth + time-to-full | ✅ 10-min usage window | ✅ 10-min usage window |
 | Requests in flight | ❌ not exposed by IOKit | ✅ `/proc/diskstats` col 12 |
 
-The 2.0 view renders `--` for anything the platform can't measure and keeps the column, so
+Dense renders `--` for anything the platform can't measure and keeps the column, so
 the layout never shifts between machines. Utilisation is the one that matters: macOS has no
 time-with-IO-in-flight counter, only summed service time, which on a deep-queue NVMe exceeds
 wall clock and would read as a permanent 100%. Rather than print that, the devices table

@@ -97,7 +97,7 @@ impl FileSort {
 }
 
 #[derive(Debug, Default)]
-pub struct V2State {
+pub struct DenseState {
     pub selected: usize,
     pub offset: usize,
     pub filter_input: bool,
@@ -1803,10 +1803,10 @@ fn smart_box(buf: &mut Buffer, area: Rect, app: &App) {
 
 pub fn sorted_rows(app: &App) -> Vec<crate::ui::lite::HotRow> {
     let mut rows =
-        crate::ui::lite::filter_rows(crate::ui::lite::collect_rows(app), &app.v2.filter_text);
+        crate::ui::lite::filter_rows(crate::ui::lite::collect_rows(app), &app.dense.filter_text);
     // Sorted from the DECLARED key, so the order and the indicator in the box
     // border cannot disagree.
-    match app.v2.sort {
+    match app.dense.sort {
         FileSort::Rate => rows.sort_by(|a, b| {
             b.events_per_sec
                 .partial_cmp(&a.events_per_sec)
@@ -1820,7 +1820,7 @@ pub fn sorted_rows(app: &App) -> Vec<crate::ui::lite::HotRow> {
 
 fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
     let rows = sorted_rows(app);
-    let st = &app.v2;
+    let st = &app.dense;
     let total = rows.len();
     let visible = area.height.saturating_sub(3) as usize;
     let first = st.offset.min(total.saturating_sub(1));
@@ -2428,7 +2428,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let mut app = App::new_for_test(TabId::Overview, ViewMode::V2);
+        let mut app = App::new_for_test(TabId::Overview, ViewMode::Dense);
         app.growth.observe(&app.filesystems);
         app.io.sample();
         for (w, h) in [

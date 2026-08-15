@@ -1,4 +1,4 @@
-//! btop-grade drawing primitives for the 2.0 view.
+//! btop-grade drawing primitives for the dense view.
 //!
 //! A port of the design handoff's `nb-braille.jsx` onto a ratatui `Buffer`.
 //! Three things separate btop's graphs from a bar chart, and all three are

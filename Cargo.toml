@@ -1,6 +1,6 @@
 [package]
 name = "diskwatch"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Single-host, read-only disk diagnostics TUI. Eight tabs across devices, volumes, filesystems, IO, SMART, hot files, and insights. Sibling to netwatch and syswatch."
@@ -14,8 +14,8 @@ exclude = [
     # Demo assets aren't needed by anyone consuming the crate.
     "demo.gif",
     "demo.tape",
-    "demo-v2.gif",
-    "demo-v2.tape",
+    "demo-dense.gif",
+    "demo-dense.tape",
 ]
 
 [[bin]]
