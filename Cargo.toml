@@ -14,6 +14,8 @@ exclude = [
     # Demo assets aren't needed by anyone consuming the crate.
     "demo.gif",
     "demo.tape",
+    "demo-v2.gif",
+    "demo-v2.tape",
 ]
 
 [[bin]]

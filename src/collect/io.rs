@@ -25,6 +25,16 @@ use std::time::{Duration, Instant};
 /// 200ms = 5Hz, matching the technical doc's per-device IO loop.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Milliseconds per sample in the fast aggregate ring. Anything drawing that
+/// ring computes its axis span from this rather than assuming a rate — an axis
+/// that labels its own width wrongly is worse than one with no label, because
+/// it is read and believed.
+pub const FAST_SAMPLE_MS: usize = 200;
+
+/// Fast-ring length. Braille takes two samples per character column, so this
+/// covers a 600-column graph, and at 5Hz it holds four minutes.
+const FAST_RING_LEN: usize = 1200;
+
 /// Seconds of history the per-device ring holds. Anything drawing that ring
 /// labels its axis from this rather than from a guess about the sample rate —
 /// a sparkline claiming "60s" while showing five is worse than no label.
@@ -183,6 +193,18 @@ struct DeviceTotals {
 pub struct AggHistory {
     pub read_bps: VecDeque<f64>,
     pub write_bps: VecDeque<f64>,
+    /// The same totals at the full 5Hz sample rate.
+    ///
+    /// The 1Hz rings above are what the Lite view wants: one sample per chart
+    /// column, one column per second. A braille graph takes TWO samples per
+    /// column, so feeding it the 1Hz ring makes each character cell span two
+    /// seconds — a 147-column graph then covers five minutes, and every cell is
+    /// built from two samples a second apart, which on bursty IO lights one
+    /// sub-column and not the other and renders the fill as a comb. At 5Hz a
+    /// column is 400ms, the pair inside it is 200ms apart, and the graph covers
+    /// the ~60s the design asks for.
+    pub read_bps_fast: VecDeque<f64>,
+    pub write_bps_fast: VecDeque<f64>,
     /// Accumulator for the second currently in progress.
     acc_read: f64,
     acc_write: f64,
@@ -192,6 +214,9 @@ pub struct AggHistory {
 
 impl AggHistory {
     fn accumulate(&mut self, read_bps: f64, write_bps: f64, now: Instant) {
+        push_ring(&mut self.read_bps_fast, read_bps, FAST_RING_LEN);
+        push_ring(&mut self.write_bps_fast, write_bps, FAST_RING_LEN);
+
         self.acc_read += read_bps;
         self.acc_write += write_bps;
         self.acc_n += 1;

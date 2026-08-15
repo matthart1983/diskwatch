@@ -46,6 +46,10 @@ Where `lsblk` shows you *which disks exist*, DiskWatch shows you *what's happeni
 diskwatch --v2
 ```
 
+<p align="center">
+  <img src="demo-v2.gif" alt="DiskWatch 2.0 — the six-box screen, recorded against real disk traffic" width="800">
+</p>
+
 Six boxes tile the terminal with **zero chrome rows** — no header bar, no menu bar, no
 status bar. Identity, uptime, sort state, paging and every keybind live inside the box
 borders, which a box spends anyway.
