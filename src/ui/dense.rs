@@ -345,13 +345,13 @@ fn age(secs: u64) -> String {
     }
 }
 
-/// Seconds covered by `samples` of the fast aggregate ring.
+/// Seconds covered by `columns` of the graph ring.
 ///
-/// The bug this exists to prevent: the graph takes two samples per character
-/// column, so it is tempting to write `columns` where `seconds` is meant. On a
-/// 1Hz ring that mislabelled a five-minute axis as two minutes.
-fn span_secs(samples: usize) -> usize {
-    samples * crate::collect::io::FAST_SAMPLE_MS / 1000
+/// The bug this exists to prevent: it is tempting to write a column count
+/// where a second count is meant. That mislabelled a five-minute axis as two
+/// minutes in v0.2.0.
+fn span_secs(columns: usize) -> usize {
+    columns * crate::collect::io::GRAPH_SAMPLE_MS / 1000
 }
 
 fn secs_label(n: usize) -> String {
@@ -374,31 +374,19 @@ fn window(ring: &std::collections::VecDeque<f64>, want: usize) -> Vec<f64> {
     out
 }
 
-/// Collapse a sample window into ONE value per character column, then emit it
-/// into both braille sub-columns.
-///
-/// A braille cell is two sub-columns wide, and the obvious thing — feed it two
-/// consecutive samples — is what the design handoff asked for. On real IO it
-/// is wrong. Disk throughput swings between a burst and nothing several times
-/// a second, so the two samples inside one cell routinely differ by more than
-/// 2x, one sub-column lights and the other doesn't, and the area fill renders
-/// as a comb of vertical stripes. netwatch shipped that exact bug and fixed it
-/// in v0.28.0; `ui::graph`'s dots style has carried the fix ever since, and
-/// its comment says why. This is the same fix.
-///
-/// Each column becomes the MEAN of the interval it covers, which is also what
-/// makes the headline figures honest: peak and avg are computed from this
-/// series, so the number beside the graph is the number in the graph rather
-/// than a raw sample the pixels never showed.
-fn column_series(ring: &std::collections::VecDeque<f64>, cols: usize, per_col: usize) -> Vec<f64> {
-    let raw = window(ring, cols * per_col);
-    raw.chunks(per_col)
-        .map(|c| c.iter().sum::<f64>() / c.len() as f64)
-        .collect()
-}
-
 /// Expand one value per column into the two sub-columns `graph` reads, so both
 /// light together and the fill is a solid area.
+///
+/// A braille cell is two sub-columns wide, and the obvious thing — feed it two
+/// consecutive samples — is what the design handoff asked for. On real IO it is
+/// wrong twice over. Disk throughput swings between a burst and nothing several
+/// times a second, so the two samples inside a cell routinely differ by more
+/// than 2x: one sub-column lights, the other doesn't, and the fill renders as a
+/// comb of stripes rather than an area. netwatch shipped that exact bug and
+/// fixed it in v0.28.0. And pairing at draw time re-pairs on every tick,
+/// because the window slides by one sample — so every column changes value and
+/// the graph shimmers instead of scrolling. The ring is decimated on the way in
+/// instead; see `collect::io::GRAPH_SAMPLE_MS`.
 fn subpixels(cols: &[f64]) -> Vec<f64> {
     cols.iter().flat_map(|&v| [v, v]).collect()
 }
@@ -636,13 +624,11 @@ fn io_box(buf: &mut Buffer, area: Rect, app: &App, s: &Sys, read_rows: u16) {
     if gw < 8 {
         return;
     }
-    // Two samples per column, averaged into one value per column: see
-    // `column_series`. `want` stays the sample count, because that is what
-    // sets the axis span.
-    let per_col = 2;
-    let want = gw as usize * per_col;
-    let read = column_series(&app.io.agg.read_bps_fast, gw as usize, per_col);
-    let write = column_series(&app.io.agg.write_bps_fast, gw as usize, per_col);
+    // One ring entry per column, so a new reading scrolls the graph by exactly
+    // one column and every other column keeps the value it had.
+    let want = gw as usize;
+    let read = window(&app.io.agg.read_bps_graph, want);
+    let write = window(&app.io.agg.write_bps_graph, want);
     let (rv, rtop) = scaled(&subpixels(&read));
     let (wv, wtop) = scaled(&subpixels(&write));
     let cur_r = read.last().copied().unwrap_or(0.0);
@@ -2102,10 +2088,9 @@ fn render_compact(buf: &mut Buffer, area: Rect, app: &App) {
     if gw < 8 {
         return;
     }
-    let per_col = 2;
-    let want = gw as usize * per_col;
-    let read = column_series(&app.io.agg.read_bps_fast, gw as usize, per_col);
-    let write = column_series(&app.io.agg.write_bps_fast, gw as usize, per_col);
+    let want = gw as usize;
+    let read = window(&app.io.agg.read_bps_graph, want);
+    let write = window(&app.io.agg.write_bps_graph, want);
     let (rv, rtop) = scaled(&subpixels(&read));
     let (wv, wtop) = scaled(&subpixels(&write));
 
@@ -2337,22 +2322,40 @@ mod tests {
 
     #[test]
     fn the_time_axis_states_the_span_it_actually_draws() {
-        // The bug this pins: a braille graph takes TWO samples per character
-        // column, so `want / 2` is the COLUMN count, not the second count.
-        // Labelling the axis with it halved every span on screen — a graph
-        // covering five minutes was captioned `2m`, and the mid-tick was
-        // wrong by the same factor.
-        let ms = crate::collect::io::FAST_SAMPLE_MS;
-        // One column is two samples, so a column is 2 × the sample interval.
-        assert_eq!(span_secs(2), 2 * ms / 1000);
-        // A 147-column graph at 5Hz is a shade under a minute — the window
-        // the design asks for, and the reason the fast ring exists.
-        assert_eq!(span_secs(147 * 2), 58);
+        // The bug this pins: writing a COLUMN count where a second count is
+        // meant. It captioned a five-minute axis as `2m` in v0.2.0, and put
+        // the mid-tick in the wrong place by the same factor.
+        let ms = crate::collect::io::GRAPH_SAMPLE_MS;
+        assert_eq!(span_secs(5), 5 * ms / 1000);
+        // A 147-column graph is a shade under a minute — the window the
+        // design asks for.
+        assert_eq!(span_secs(147), 58);
         // The mid-tick is half the span, not half the column count.
-        assert_eq!(span_secs(300) / 2, 30);
-        // And the label formats that, rather than the raw sample count.
-        assert_eq!(secs_label(span_secs(147 * 2)), "58s");
-        assert_eq!(secs_label(span_secs(1200)), "4m");
+        assert_eq!(span_secs(150) / 2, 30);
+        assert_eq!(secs_label(span_secs(147)), "58s");
+        assert_eq!(secs_label(span_secs(600)), "4m");
+    }
+
+    #[test]
+    fn a_new_reading_scrolls_the_graph_by_exactly_one_column() {
+        // The jank this pins: with two samples per column averaged at draw
+        // time, the window slid by one sample per tick, the pairing parity
+        // flipped, and EVERY column changed value — the graph shimmered
+        // between two shapes instead of scrolling. One ring entry per column
+        // means the tail of one frame is the head of the next.
+        let mut ring: std::collections::VecDeque<f64> = (0..200).map(|i| i as f64).collect();
+        let before = window(&ring, 110);
+        ring.push_back(999.0);
+        let after = window(&ring, 110);
+        assert_eq!(
+            &before[1..],
+            &after[..109],
+            "columns shifted by more than one"
+        );
+        assert_eq!(
+            after[109], 999.0,
+            "the newest reading is not at the right edge"
+        );
     }
 
     #[test]
