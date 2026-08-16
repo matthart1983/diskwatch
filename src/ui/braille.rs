@@ -56,19 +56,29 @@ pub enum Ramp {
     Load,
 }
 
+// Stops are spaced by CONTRAST against the terminal background — 4.5, 6.5, 9,
+// 11.5 and 14 to 1 — not by even steps through RGB.
+//
+// The design handoff's ramps started at #134f42 and #103f52, which measure
+// 2.0:1 and 1.6:1 against #0c1418. That is below the 3:1 floor for non-text
+// UI, and it lands on exactly the wrong rows: an area graph puts almost all of
+// its ink near the baseline, so the fill a normal workload draws was the part
+// nobody could see, while the bright end was reserved for spikes that happen
+// rarely. Lifting the dark end is a deviation from the handoff and a
+// deliberate one; `ramps_stay_legible_against_the_background` holds the floor.
 const RAMP_READ: [(u8, u8, u8); 5] = [
-    (0x13, 0x4f, 0x42),
-    (0x1f, 0x7d, 0x58),
-    (0x3b, 0xb6, 0x73),
-    (0x5c, 0xd9, 0x89),
-    (0xa6, 0xf2, 0xc0),
+    (0x22, 0x8d, 0x75),
+    (0x2b, 0xad, 0x79),
+    (0x5a, 0xc9, 0x8c),
+    (0x7a, 0xe0, 0x9e),
+    (0xa1, 0xf1, 0xbc),
 ];
 const RAMP_WRITE: [(u8, u8, u8); 5] = [
-    (0x10, 0x3f, 0x52),
-    (0x1c, 0x6f, 0x8c),
-    (0x3a, 0xa9, 0xc9),
-    (0x5f, 0xdc, 0xff),
-    (0xb6, 0xed, 0xff),
+    (0x22, 0x86, 0xae),
+    (0x29, 0xa5, 0xcf),
+    (0x6e, 0xc0, 0xd7),
+    (0x58, 0xdb, 0xff),
+    (0xa8, 0xea, 0xff),
 ];
 const RAMP_LOAD: [(u8, u8, u8); 5] = [
     (0x5c, 0xd9, 0x89),
@@ -703,6 +713,67 @@ mod tests {
             Some((0.30, 0.68)),
         );
         assert_ne!(lo.cell((0, 0)).unwrap().fg, hi.cell((0, 0)).unwrap().fg);
+    }
+
+    /// Relative luminance, WCAG 2.x.
+    fn luminance(c: Color) -> f64 {
+        match c {
+            Color::Rgb(r, g, b) => {
+                let ch = |v: u8| {
+                    let s = v as f64 / 255.0;
+                    if s <= 0.03928 {
+                        s / 12.92
+                    } else {
+                        ((s + 0.055) / 1.055).powf(2.4)
+                    }
+                };
+                0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+            }
+            _ => 0.0,
+        }
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn ramps_stay_legible_against_the_background() {
+        // An area graph puts most of its ink near the baseline, which is the
+        // DARK end of a magnitude ramp — so the dark end is what has to be
+        // readable, not just the peaks. The handoff's ramps bottomed out at
+        // 2.0:1 and 1.6:1, under the 3:1 WCAG floor for non-text UI, and the
+        // fill a normal workload draws was invisible.
+        let bg = crate::ui::theme::by_name("dark").bg;
+        for ramp in [Ramp::Read, Ramp::Write, Ramp::Load] {
+            for i in 0..=20 {
+                let f = i as f64 / 20.0;
+                let c = contrast(ramp.at(f), bg);
+                assert!(
+                    c >= 4.0,
+                    "{ramp:?} at {f:.2} is only {c:.1}:1 on the background"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn magnitude_ramps_still_climb() {
+        // Legibility must not flatten the gradient: height is the channel that
+        // makes a spike's severity pre-attentive.
+        let bg = crate::ui::theme::by_name("dark").bg;
+        for ramp in [Ramp::Read, Ramp::Write] {
+            let lo = contrast(ramp.at(0.0), bg);
+            let hi = contrast(ramp.at(1.0), bg);
+            assert!(hi > lo * 2.5, "{ramp:?} spans only {lo:.1}:1 to {hi:.1}:1");
+            for i in 1..=4 {
+                let a = contrast(ramp.at((i - 1) as f64 / 4.0), bg);
+                let b = contrast(ramp.at(i as f64 / 4.0), bg);
+                assert!(b > a, "{ramp:?} stop {i} does not brighten");
+            }
+        }
     }
 
     #[test]

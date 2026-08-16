@@ -49,7 +49,7 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use crate::app::App;
-use crate::collect::io::{LAT_BUCKETS, LAT_EDGES_MS, LAT_TAIL_FROM};
+use crate::collect::io::{HISTORY_SECS, LAT_BUCKETS, LAT_EDGES_MS, LAT_TAIL_FROM};
 use crate::ui::braille::{self as br, Ramp};
 use crate::ui::palette as p;
 
@@ -429,38 +429,57 @@ fn band(v: f64, lo: f64, hi: f64, log: bool) -> f64 {
     SPARK_BAND.0 + (SPARK_BAND.1 - SPARK_BAND.0) * f.clamp(0.0, 1.0)
 }
 
-/// Fit a whole ring into `want` samples.
+/// Squeeze the last [`HISTORY_SECS`] of a ring into `cols` columns, grouping
+/// samples by their ABSOLUTE index so a group's membership never changes.
 ///
-/// A row sparkline is 12 to 18 cells wide, or 24 to 36 samples, while the rings
-/// behind it hold 240. Taking the newest 36 would draw the last five seconds
-/// under a column labelled `48s`. Averaging blocks instead shows the whole
-/// retained window, which is what the label promises.
-fn condense(history: &[f64], want: usize) -> Vec<f64> {
-    if want == 0 {
+/// `pushed` is how many samples the ring has ever seen. Grouping by position
+/// within the ring instead re-groups every sample the moment one ages out —
+/// which is what made the main graph shimmer between two shapes rather than
+/// scroll, and what the sparklines were still doing at 5Hz. Anchoring to
+/// absolute index means a column keeps its value until it scrolls off the left
+/// edge, and a new column appears once every `per` samples.
+///
+/// `sample_ms` is the ring's own cadence, so every caller covers the same
+/// wall-clock window whatever rate it samples at.
+fn condense(history: &[f64], pushed: u64, cols: usize, sample_ms: usize) -> Vec<f64> {
+    if cols == 0 || sample_ms == 0 {
         return Vec::new();
     }
-    if history.len() <= want {
-        // Still warming: left-pad so the trace grows in from the right rather
-        // than stretching across a window it hasn't filled.
-        let mut out = vec![0.0; want - history.len()];
-        out.extend_from_slice(history);
-        return out;
+    let want = (HISTORY_SECS * 1000 / sample_ms).max(cols);
+    let per = (want / cols).max(1) as u64;
+    let first = pushed.saturating_sub(history.len() as u64);
+    let last_group = pushed.saturating_sub(1) / per;
+    let mut out = Vec::with_capacity(cols);
+    for c in 0..cols as u64 {
+        let Some(group) = last_group.checked_sub(cols as u64 - 1 - c) else {
+            out.push(0.0);
+            continue;
+        };
+        let (lo, hi) = (group * per, group * per + per);
+        let (mut sum, mut n) = (0.0, 0u32);
+        for abs in lo..hi {
+            if abs < first || abs >= pushed {
+                continue;
+            }
+            sum += history[(abs - first) as usize];
+            n += 1;
+        }
+        out.push(if n == 0 { 0.0 } else { sum / n as f64 });
     }
-    let per = history.len() as f64 / want as f64;
-    (0..want)
-        .map(|i| {
-            let lo = (i as f64 * per).floor() as usize;
-            let hi = (((i + 1) as f64 * per).ceil() as usize)
-                .min(history.len())
-                .max(lo + 1);
-            history[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
-        })
-        .collect()
+    out
 }
 
-/// Normalise a row sparkline's history against an absolute ceiling.
-fn spark_vals(history: &[f64], ceiling: f64, log: bool, want: usize) -> Vec<f64> {
-    condense(history, want)
+/// Normalise a row sparkline's history against an absolute ceiling, then emit
+/// one value per column into both braille sub-columns.
+fn spark_vals(
+    history: &[f64],
+    pushed: u64,
+    ceiling: f64,
+    log: bool,
+    cols: usize,
+    sample_ms: usize,
+) -> Vec<f64> {
+    let cond: Vec<f64> = condense(history, pushed, cols, sample_ms)
         .into_iter()
         .map(|v| {
             if v <= 0.0 {
@@ -469,7 +488,8 @@ fn spark_vals(history: &[f64], ceiling: f64, log: bool, want: usize) -> Vec<f64>
                 band(v, 0.001, ceiling, log)
             }
         })
-        .collect()
+        .collect();
+    subpixels(&cond)
 }
 
 // ── layout ─────────────────────────────────────────────────────────────────
@@ -900,6 +920,7 @@ struct DevRow {
     util: Option<f64>,
     stacked: bool,
     history: Vec<f64>,
+    pushed: u64,
 }
 
 fn dev_rows(app: &App) -> Vec<DevRow> {
@@ -926,6 +947,7 @@ fn dev_rows(app: &App) -> Vec<DevRow> {
                     .get(&t.device)
                     .map(|h| h.combined.iter().copied().collect())
                     .unwrap_or_default(),
+                pushed: app.io.history.get(&t.device).map(|h| h.pushed).unwrap_or(0),
             }
         })
         .collect();
@@ -1014,7 +1036,7 @@ fn devices_box(buf: &mut Buffer, area: Rect, app: &App, s: &Sys) {
     // to every pair of writers that share a row: the flexible one is sized
     // from what is beside it, so neither can ever reach into the other.
     let spark_w = inner.width.saturating_sub(51).min(14);
-    let dev_span = secs_label(crate::collect::io::DEVICE_RING_SECS);
+    let dev_span = secs_label(crate::collect::io::HISTORY_SECS);
     let cols = vec![
         Col {
             lab: "DEVICE",
@@ -1148,7 +1170,14 @@ fn devices_box(buf: &mut Buffer, area: Rect, app: &App, s: &Sys) {
             // Level is ABSOLUTE — log-scaled from 1 MB/s to 2 GB/s — so a quiet
             // device draws a low trace instead of being stretched to fill the
             // band just because it happens to be the busiest row on screen.
-            let vals = spark_vals(&r.history, 2e9, true, spark_w as usize * 2);
+            let vals = spark_vals(
+                &r.history,
+                r.pushed,
+                2e9,
+                true,
+                spark_w as usize,
+                crate::collect::io::SAMPLE_MS,
+            );
             br::spark(
                 buf,
                 inner.x + cols[6].x,
@@ -1881,7 +1910,7 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
     // rather than left to be clipped by the buffer. A half-drawn column reads
     // as a rendering bug; an absent one reads as a narrow terminal.
     let w = inner.width;
-    let file_span = secs_label(crate::collect::hot_files::HISTORY_LEN);
+    let file_span = secs_label(crate::collect::io::HISTORY_SECS);
     let spark_w = if wide && w >= 108 {
         (w - 96).min(18)
     } else {
@@ -2038,7 +2067,7 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
             // Absolute again: 0.1 to 200 events/s, log-scaled, so a busy file
             // and a quiet one draw different heights instead of both filling
             // the band.
-            let vals = spark_vals(&r.history, 200.0, true, spark_w as usize * 2);
+            let vals = spark_vals(&r.history, r.pushed, 200.0, true, spark_w as usize, 1000);
             let (cx, _) = col(&file_span).unwrap_or((0, 0));
             br::spark(
                 buf,
@@ -2306,18 +2335,70 @@ mod tests {
     }
 
     #[test]
-    fn a_sparkline_shows_the_whole_window_its_header_claims() {
-        // The 240-sample ring behind a 24-sample sparkline. Taking the newest
-        // 24 would draw five seconds under a column headed 48s; averaging
-        // blocks shows all of it.
-        let ring: Vec<f64> = (0..240).map(|i| i as f64).collect();
-        let out = condense(&ring, 24);
-        assert_eq!(out.len(), 24);
-        assert!(out[0] < 12.0, "oldest block missing: {}", out[0]);
-        assert!(out[23] > 228.0, "newest block missing: {}", out[23]);
-        // And a short ring still pads rather than stretching.
-        assert_eq!(condense(&[1.0, 2.0], 4), vec![0.0, 0.0, 1.0, 2.0]);
-        assert!(condense(&[], 0).is_empty());
+    fn a_sparkline_scrolls_instead_of_re_grouping() {
+        // The jank this pins, and the reason `pushed` exists. Grouping samples
+        // by their position in the ring re-groups all of them the moment one
+        // ages out: every column changes value and the sparkline shimmers.
+        //
+        // Grouping by absolute index gives the property that matters: a column
+        // NEVER changes once it is complete. Only the newest column moves, as
+        // samples land in it, and once it fills the picture scrolls by exactly
+        // one.
+        let cols = 12;
+        let ms = crate::collect::io::SAMPLE_MS;
+        let per = HISTORY_SECS * 1000 / ms / cols;
+        let mut ring: Vec<f64> = (0..600).map(|i| i as f64).collect();
+        let mut pushed = 600u64;
+
+        let mut shifts = 0;
+        let mut prev = condense(&ring, pushed, cols, ms);
+        for i in 0..per * 3 {
+            ring.remove(0);
+            ring.push(600.0 + i as f64);
+            pushed += 1;
+            let now = condense(&ring, pushed, cols, ms);
+            let settled = cols - 1;
+            if now[..settled] == prev[..settled] {
+                // Held: every settled column kept its value.
+            } else {
+                // Scrolled: the settled columns are yesterday's, shifted one
+                // left. Anything else is a re-group.
+                assert_eq!(
+                    now[..settled - 1],
+                    prev[1..settled],
+                    "columns re-grouped at push {i}"
+                );
+                shifts += 1;
+            }
+            prev = now;
+        }
+        assert_eq!(shifts, 3, "expected one scroll per {per} samples");
+    }
+
+    #[test]
+    fn every_history_on_the_screen_covers_the_same_window() {
+        // Four windows and three animation rates used to share this screen: a
+        // 48s graph, a 48s device spark, a 60s latency window and a 5m file
+        // spark. Nothing on it could be read against anything else.
+        let ms = crate::collect::io::SAMPLE_MS;
+        for (name, cadence) in [("device ring", ms), ("file history", 1000)] {
+            let samples = HISTORY_SECS * 1000 / cadence;
+            let ring: Vec<f64> = (0..samples * 2).map(|i| i as f64).collect();
+            let out = condense(&ring, ring.len() as u64, 12, cadence);
+            assert_eq!(out.len(), 12, "{name}");
+            // The oldest column must come from HISTORY_SECS ago, not from the
+            // whole retained ring.
+            let oldest_abs = ring.len() as f64 - samples as f64;
+            assert!(
+                out[0] >= oldest_abs - samples as f64 / 12.0,
+                "{name} reaches further back than {HISTORY_SECS}s"
+            );
+        }
+        // And the graph ring is decimated to the same cadence.
+        assert_eq!(
+            crate::collect::io::GRAPH_SAMPLE_MS,
+            crate::collect::io::HISTORY_MS
+        );
     }
 
     #[test]
@@ -2327,13 +2408,14 @@ mod tests {
         // the mid-tick in the wrong place by the same factor.
         let ms = crate::collect::io::GRAPH_SAMPLE_MS;
         assert_eq!(span_secs(5), 5 * ms / 1000);
-        // A 147-column graph is a shade under a minute — the window the
-        // design asks for.
-        assert_eq!(span_secs(147), 58);
+        // At one column per HISTORY_MS, the graph reaches HISTORY_SECS at the
+        // width the rest of the screen is sized around.
+        let cols_for_window = HISTORY_SECS * 1000 / ms;
+        assert_eq!(span_secs(cols_for_window), HISTORY_SECS);
         // The mid-tick is half the span, not half the column count.
-        assert_eq!(span_secs(150) / 2, 30);
-        assert_eq!(secs_label(span_secs(147)), "58s");
-        assert_eq!(secs_label(span_secs(600)), "4m");
+        assert_eq!(span_secs(120) / 2, 30);
+        assert_eq!(secs_label(span_secs(cols_for_window)), "60s");
+        assert_eq!(secs_label(span_secs(480)), "4m");
     }
 
     #[test]
@@ -2362,9 +2444,11 @@ mod tests {
     fn sparkline_headers_state_the_span_they_draw() {
         // Both headers are computed from the ring behind them rather than
         // typed, so this only has to pin the formatter they share.
-        assert_eq!(secs_label(crate::collect::io::DEVICE_RING_SECS), "48s");
-        assert_eq!(secs_label(crate::collect::hot_files::HISTORY_LEN), "5m");
+        // Every one of them now states the same window, because every one of
+        // them draws it.
+        assert_eq!(secs_label(HISTORY_SECS), "60s");
         assert_eq!(secs_label(90), "90s");
+        assert_eq!(secs_label(300), "5m");
     }
 
     #[test]

@@ -345,6 +345,9 @@ pub struct HotRow {
     pub kind: &'static str,
     pub secs_since_seen: u64,
     pub history: Vec<f64>,
+    /// Readings ever pushed — lets a sparkline group them by absolute index
+    /// rather than by ring position. See `FileActivity::pushed`.
+    pub pushed: u64,
 }
 
 /// Snapshot the watcher into display rows, sorted by activity.
@@ -382,6 +385,7 @@ pub fn collect_rows(app: &App) -> Vec<HotRow> {
                 kind: a.last_kind.label(),
                 secs_since_seen: now.duration_since(a.last_seen).as_secs(),
                 history: a.history.iter().copied().collect(),
+                pushed: a.pushed,
             }
         })
         .collect();

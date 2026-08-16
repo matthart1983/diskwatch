@@ -89,6 +89,9 @@ pub struct FileActivity {
     /// One `events_per_sec` reading per second, oldest first. Written
     /// by `decay()`, which the App calls at 1 Hz.
     pub history: VecDeque<f64>,
+    /// Readings ever pushed, including those that have aged out — see
+    /// `DeviceHistory::pushed` for why a sparkline needs this.
+    pub pushed: u64,
 }
 
 #[derive(Default)]
@@ -118,6 +121,7 @@ impl HotFileState {
                 last_kind: kind,
                 last_seen: now,
                 history: VecDeque::new(),
+                pushed: 0,
             });
         entry.total_events += 1;
         entry.last_kind = kind;
@@ -197,6 +201,7 @@ impl HotFileWatcher {
                 a.history.pop_front();
             }
             a.history.push_back(a.events_per_sec);
+            a.pushed += 1;
 
             a.events_per_sec *= factor;
             if a.events_per_sec < 0.01 {

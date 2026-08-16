@@ -21,9 +21,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+/// Milliseconds between `sample()` calls actually doing work — 5Hz, matching
+/// the technical doc's per-device IO loop. Anything drawing a raw per-device
+/// ring computes its window from this rather than assuming a rate.
+pub const SAMPLE_MS: usize = 200;
+
 /// Minimum interval between `sample()` calls actually doing work.
-/// 200ms = 5Hz, matching the technical doc's per-device IO loop.
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(SAMPLE_MS as u64);
 
 /// Milliseconds per entry in the graph ring — one entry per character column.
 ///
@@ -33,18 +37,23 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 /// value changes on every tick and the whole graph shimmers instead of
 /// scrolling. One ring entry per column means a new sample shifts the graph by
 /// exactly one column and leaves the rest untouched.
-pub const GRAPH_SAMPLE_MS: usize = 400;
+pub const GRAPH_SAMPLE_MS: usize = HISTORY_MS;
+/// The cadence every live history on the dense screen advances at, and the
+/// window every one of them covers.
+///
+/// They used to disagree: a 400ms graph beside a 5Hz device sparkline beside a
+/// 1Hz file sparkline, spanning 48s, 48s, 60s and five minutes respectively.
+/// Four windows and three animation rates on one screen means nothing on it
+/// can be read against anything else.
+pub const HISTORY_MS: usize = 500;
+pub const HISTORY_SECS: usize = 60;
+
 /// 5Hz samples folded into each graph entry.
 const GRAPH_DECIMATE: u32 = (GRAPH_SAMPLE_MS / 200) as u32;
 
 /// Graph-ring length, in columns. Covers a 1200-column terminal, and at 400ms
 /// per column it holds eight minutes.
 const GRAPH_RING_LEN: usize = 1200;
-
-/// Seconds of history the per-device ring holds. Anything drawing that ring
-/// labels its axis from this rather than from a guess about the sample rate —
-/// a sparkline claiming "60s" while showing five is worse than no label.
-pub const DEVICE_RING_SECS: usize = 48;
 
 /// Sparkline ring length — 240 samples at 5Hz = 48s of throughput.
 /// Large enough that on a 130-wide terminal the visible window already
@@ -157,6 +166,14 @@ pub struct DeviceHistory {
     /// produce [`IoTick::lat_hist`]; kept per-sample so the window slides
     /// instead of accumulating since boot.
     pub lat_hist: VecDeque<[u64; LAT_BUCKETS]>,
+    /// Samples ever pushed, including those that have aged out.
+    ///
+    /// A sparkline squeezes a long ring into a dozen columns, and grouping
+    /// those samples by their position in the ring re-groups them every time
+    /// one ages out — every column changes and the sparkline shimmers rather
+    /// than scrolls. Grouping by ABSOLUTE index instead keeps a group's
+    /// membership fixed for its whole life. See `dense::condense`.
+    pub pushed: u64,
 }
 
 impl DeviceHistory {
@@ -374,6 +391,7 @@ impl IoCollector {
 
             let h = self.history.entry(device.clone()).or_default();
             push_ring(&mut h.combined, bps, RING_LEN);
+            h.pushed += 1;
             push_ring(&mut h.read_bps, read_bps, RING_LEN);
             push_ring(&mut h.write_bps, write_bps, RING_LEN);
             if let Some(v) = sample_r_us {
