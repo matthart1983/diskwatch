@@ -124,13 +124,20 @@ Rust 1.75+.
 | `--lite` | Start in Lite |
 | `--view` | `full`, `lite`, `dense` |
 | `--tab` | Start on a named tab |
-| `--theme` | `dark` (default), `light`, `ocean`, `solarized`, `dracula`, `nord`, `terminal` |
+| `--theme` | `terminal` (default), `dark`, `light`, `ocean`, `solarized`, `dracula`, `nord` |
 | `--graph` | `bars` (default) or `dots` for btop-style braille |
-| `--graph-fade` | btop's brightness gradient and dot grid |
+| `--graph-fade` | btop's brightness gradient and dot grid — needs an RGB theme, so pair with `--theme dark` |
 | `--diag` | Print collected state and exit, no TUI |
 
-`--theme terminal` pins no colours of its own — every slot resolves to an ANSI entry and
-foreground/background use your terminal's, so pywal or a terminal profile carries through.
+**diskwatch defers to your terminal's palette by default.** It pins no colours of its
+own: every slot resolves to an ANSI entry and foreground/background use `Reset`, so a
+terminal profile, pywal, matugen or a system-wide rice carries straight through and
+diskwatch sits beside your other tools instead of fighting them.
+
+Pass `--theme dark` for diskwatch's own designed palette, or any of the other built-ins.
+Those pin real RGB, which is what `--graph-fade` needs to fade through — a 16-colour
+palette has no intermediate shades, so the gradient does nothing under the default.
+
 Theme and graph style are also live in the settings overlay; neither persists between runs,
 so use the flag to make one stick.
 

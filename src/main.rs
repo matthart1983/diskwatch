@@ -18,9 +18,14 @@ struct Cli {
     #[arg(long)]
     tab: Option<String>,
 
-    /// Color theme: "dark" (default) or "terminal" to use the colors your
-    /// terminal already defines, so system-wide themes carry over.
-    #[arg(long, default_value = "dark", value_parser = parse_theme)]
+    /// Color theme. Defaults to "terminal": every color resolves through
+    /// the palette your terminal already defines, so a system-wide theme
+    /// (a terminal profile, pywal, matugen, a rice) carries straight over
+    /// and diskwatch sits beside your other tools instead of fighting them.
+    ///
+    /// Pass "dark" for diskwatch's own designed palette, or any of the
+    /// other built-ins: light, ocean, solarized, dracula, nord.
+    #[arg(long, default_value = ui::theme::DEFAULT_THEME, value_parser = parse_theme)]
     theme: String,
 
     /// Chart style: "bars" (default) or "dots" for btop-style braille,
@@ -30,8 +35,12 @@ struct Cli {
     graph: String,
 
     /// btop's gradient: charts fade from bright at `now` to dim at the
-    /// left edge, over a faint dot grid. Off by default; ignored under
-    /// `--theme terminal`, which pins no RGB.
+    /// left edge, over a faint dot grid. Off by default.
+    ///
+    /// Needs a theme with real RGB to fade through, so it does nothing
+    /// under the default `--theme terminal` — a 16-color palette has no
+    /// intermediate shades. Pair it with `--theme dark` (or any other
+    /// built-in) to see it.
     #[arg(long)]
     graph_fade: bool,
 
@@ -180,4 +189,37 @@ fn run_diag() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    /// diskwatch defers to the terminal's palette unless told otherwise, so a
+    /// system-wide theme carries over without configuration. There is no
+    /// config file to persist a preference in, which makes this default the
+    /// only thing standing between a riced terminal and a tool that ignores
+    /// it — so pin it.
+    #[test]
+    fn default_theme_defers_to_the_terminal() {
+        let cli = Cli::parse_from(["diskwatch"]);
+        assert_eq!(cli.theme, "terminal");
+        assert_eq!(ui::theme::by_name(&cli.theme).name, "terminal");
+    }
+
+    /// The designed palette has to stay reachable, and by that exact name.
+    #[test]
+    fn the_designed_palette_is_still_one_flag_away() {
+        let cli = Cli::parse_from(["diskwatch", "--theme", "dark"]);
+        assert_eq!(cli.theme, "dark");
+        assert_eq!(ui::theme::by_name(&cli.theme).name, "dark");
+    }
+
+    /// The flag's default is the shared constant, not a second copy of the
+    /// string that could drift from the one the theme module initialises to.
+    #[test]
+    fn the_flag_default_comes_from_the_shared_constant() {
+        let cli = Cli::parse_from(["diskwatch"]);
+        assert_eq!(cli.theme, ui::theme::DEFAULT_THEME);
+    }
 }

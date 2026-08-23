@@ -282,7 +282,16 @@ pub fn by_name(name: &str) -> Theme {
     }
 }
 
-static ACTIVE: RwLock<Theme> = RwLock::new(dark());
+/// The theme diskwatch uses when the user has not asked for another one.
+/// `main.rs` wires this into the `--theme` flag's default, and `ACTIVE`
+/// below is initialised to the same palette, so the two cannot drift.
+pub const DEFAULT_THEME: &str = "terminal";
+
+/// Initialised to [`DEFAULT_THEME`]'s palette so anything reading the theme
+/// before the CLI sets it agrees with what the flag advertises. This has to
+/// name the constructor directly — `by_name` is not a `const fn` — which is
+/// why `default_matches_the_static_initialiser` guards the pair.
+static ACTIVE: RwLock<Theme> = RwLock::new(terminal());
 
 pub fn active() -> Theme {
     *ACTIVE.read().expect("theme lock poisoned")
@@ -303,6 +312,34 @@ pub fn cycle() -> &'static str {
     let next = THEME_NAMES[(i + 1) % THEME_NAMES.len()];
     set_by_name(next);
     next
+}
+
+/// Serialises tests that mutate the process-wide theme. Without it,
+/// `cargo test`'s thread pool lets one test's `set_by_name` leak into
+/// another's assertions — and since the default is now `terminal`, a test
+/// that needs RGB to measure has to pin `dark` explicitly rather than
+/// inherit it.
+///
+/// Crate-visible because the theme is crate-wide: `ui::braille`'s ramp tests
+/// set it too, and a second module racing this one would reintroduce exactly
+/// the flake this exists to prevent.
+///
+/// Tests that only read (`by_name`, `dark()`, `terminal()`) touch no global
+/// state and need no lock.
+#[cfg(test)]
+static ACTIVE_THEME_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serialize a theme-mutating test and hand back a known starting state.
+/// The guard holds the lock until the test ends.
+#[cfg(test)]
+pub(crate) fn exclusive_theme(name: &str) -> std::sync::MutexGuard<'static, ()> {
+    // A panic in one such test poisons the mutex; that shouldn't cascade
+    // into failures in the others, so recover the guard either way.
+    let guard = ACTIVE_THEME_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_by_name(name);
+    guard
 }
 
 #[cfg(test)]
@@ -438,6 +475,15 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(seen, expected);
         assert_eq!(name(), start, "a full cycle must land back where it began");
+    }
+
+    #[test]
+    fn default_matches_the_static_initialiser() {
+        // `ACTIVE` cannot call `by_name`, so the constructor it names and
+        // DEFAULT_THEME are linked by hand. Reading the live global here
+        // would race every test that sets a theme, so compare the palettes
+        // themselves — pure values, no global state.
+        assert_eq!(by_name(DEFAULT_THEME).name, terminal().name);
     }
 
     #[test]

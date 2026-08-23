@@ -692,6 +692,10 @@ mod tests {
         // Height is constant on a one-row graph, so without the band every
         // cell takes the same mid-ramp colour and two very different series
         // render identically.
+        //
+        // Pins `dark`: the band is expressed as a colour gradient, and the
+        // default `terminal` theme has no intermediate shades to show it in.
+        let _g = theme::exclusive_theme("dark");
         let mut lo = buffer(1, 1);
         spark(
             &mut lo,
@@ -746,6 +750,10 @@ mod tests {
         // readable, not just the peaks. The handoff's ramps bottomed out at
         // 2.0:1 and 1.6:1, under the 3:1 WCAG floor for non-text UI, and the
         // fill a normal workload draws was invisible.
+        // Both the ramp and the bg have to come from the same theme, and
+        // luminance is only defined for RGB — so pin `dark` rather than
+        // inherit the default, which is `terminal`.
+        let _g = theme::exclusive_theme("dark");
         let bg = crate::ui::theme::by_name("dark").bg;
         for ramp in [Ramp::Read, Ramp::Write, Ramp::Load] {
             for i in 0..=20 {
@@ -763,6 +771,7 @@ mod tests {
     fn magnitude_ramps_still_climb() {
         // Legibility must not flatten the gradient: height is the channel that
         // makes a spike's severity pre-attentive.
+        let _g = theme::exclusive_theme("dark");
         let bg = crate::ui::theme::by_name("dark").bg;
         for ramp in [Ramp::Read, Ramp::Write] {
             let lo = contrast(ramp.at(0.0), bg);
@@ -781,7 +790,7 @@ mod tests {
         // The `terminal` theme's whole promise is that diskwatch defines no
         // colours of its own. A gradient has no 16-colour equivalent, so it
         // has to degrade rather than leak RGB.
-        theme::set_by_name("terminal");
+        let _g = theme::exclusive_theme("terminal");
         for f in [0.0, 0.4, 0.9, 1.0] {
             for r in [Ramp::Read, Ramp::Write, Ramp::Load] {
                 assert!(
@@ -790,6 +799,7 @@ mod tests {
                 );
             }
         }
+        // ...and the converse: an RGB theme still gets a real gradient.
         theme::set_by_name("dark");
         assert!(matches!(Ramp::Read.at(0.5), Color::Rgb(..)));
     }
