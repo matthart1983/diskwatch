@@ -35,6 +35,14 @@ pub const ALL_TABS: &[TabId] = &[
     TabId::Insights,
 ];
 
+/// Canonical CLI / config spellings, in tab order — the names `--tab` and
+/// the config file's `tab` key take. Aliases (`filesystems`, `hotfiles`)
+/// still resolve through [`TabId::from_str`]; this is the list we *offer*,
+/// so an error message names one spelling per tab rather than all of them.
+pub const TAB_NAMES: &[&str] = &[
+    "overview", "devices", "volumes", "fs", "io", "smart", "hot", "insights",
+];
+
 impl TabId {
     pub fn label(&self) -> &'static str {
         match self {

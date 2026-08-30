@@ -142,10 +142,6 @@ pub struct HotFileWatcher {
 impl HotFileWatcher {
     pub fn start(roots: &[&Path]) -> Self {
         let state = Arc::new(Mutex::new(HotFileState::default()));
-        let mut s = state.lock().unwrap();
-        s.watch_roots = roots.iter().map(|p| p.to_path_buf()).collect();
-        drop(s);
-
         let state_w = state.clone();
         let watcher_result =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -170,10 +166,32 @@ impl HotFileWatcher {
             }
         };
 
+        // One error slot, many roots. Assigning per-failure would keep
+        // only the last one, and a *later success* used to leave a stale
+        // error sitting in the slot with no failing root to explain it.
+        // With user-supplied paths a typo is the common case, not the
+        // exotic one, so collect every failure and report them together.
+        let mut errors: Vec<String> = Vec::new();
+        let mut watched: Vec<PathBuf> = Vec::new();
         for r in roots {
-            if let Err(e) = watcher.watch(r, RecursiveMode::Recursive) {
-                state.lock().unwrap().error =
-                    Some(format!("failed to watch {}: {}", r.display(), e));
+            if !r.exists() {
+                errors.push(format!("{}: no such path", r.display()));
+                continue;
+            }
+            match watcher.watch(r, RecursiveMode::Recursive) {
+                Ok(()) => watched.push(r.to_path_buf()),
+                Err(e) => errors.push(describe_watch_error(r, &e)),
+            }
+        }
+        {
+            let mut s = state.lock().unwrap();
+            // Report the roots we are actually watching, not the ones we
+            // were asked to: the tab draws this as "watch <paths>", and
+            // listing a path no event will ever come from reads as a bug
+            // in the watcher rather than a bad line in a config file.
+            s.watch_roots = watched;
+            if !errors.is_empty() {
+                s.error = Some(errors.join("; "));
             }
         }
 
@@ -264,4 +282,146 @@ pub fn default_roots() -> Vec<PathBuf> {
         roots.push(PathBuf::from("/tmp"));
     }
     roots
+}
+
+/// Turn a `notify` failure into something a user can act on.
+///
+/// Recursive watching costs one watch descriptor per directory underneath
+/// a root, so a `watch_paths` entry pointed at a large tree hits the
+/// kernel's limit readily. `notify` reports that as "OS file watch limit
+/// reached", which is true but leaves the user with nowhere to go — the
+/// fix is a sysctl, and it is worth naming.
+fn describe_watch_error(root: &Path, e: &notify::Error) -> String {
+    if matches!(e.kind, notify::ErrorKind::MaxFilesWatch) {
+        let fix = if cfg!(target_os = "linux") {
+            "raise fs.inotify.max_user_watches, or watch a narrower path"
+        } else {
+            "watch a narrower path"
+        };
+        return format!(
+            "{}: out of file watches — watching is recursive, and costs one \
+             per directory underneath this path. To fix: {fix}.",
+            root.display()
+        );
+    }
+    // `notify` walks the tree itself and gives up on the entire root if any
+    // directory underneath it can't be watched — one 0700 systemd-private
+    // directory is enough to lose all of /tmp. The bare error names the
+    // root and buries the descendant that actually failed in a debug-
+    // formatted list, which reads as "/tmp is unreadable" when it isn't.
+    let reason = match &e.kind {
+        notify::ErrorKind::Io(io) => io.to_string(),
+        _ => e.to_string(),
+    };
+    match e.paths.first() {
+        Some(p) if p != root => format!(
+            "{}: skipped — {reason} on {} (watching is recursive, so one \
+             unreadable directory underneath fails the whole root)",
+            root.display(),
+            p.display()
+        ),
+        _ => format!("{}: {reason}", root.display()),
+    }
+}
+
+/// The roots to hand [`HotFileWatcher::start`], given what the user asked
+/// for. `replace` (from `--watch` or the config's `watch_paths`) stands in
+/// for [`default_roots`] entirely; `extra` (from `--watch-add` or
+/// `extra_watch_paths`) is added to whichever list won.
+///
+/// Duplicates are dropped, keeping first position. Watching the same tree
+/// twice is not harmful — `notify` collapses it — but it doubles the path
+/// up in the tab's "watch" banner, which reads as a bug.
+pub fn resolve_roots(replace: Option<Vec<PathBuf>>, extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = replace.unwrap_or_else(default_roots);
+    roots.extend_from_slice(extra);
+    let mut seen = std::collections::HashSet::new();
+    roots.retain(|p| seen.insert(p.clone()));
+    roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_roots_add_to_the_defaults_and_replacements_stand_in_for_them() {
+        let extra = vec![PathBuf::from("/srv/data")];
+        let with_defaults = resolve_roots(None, &extra);
+        assert!(with_defaults.len() > 1, "defaults should still be present");
+        assert!(with_defaults.contains(&PathBuf::from("/srv/data")));
+
+        let replaced = resolve_roots(Some(vec![PathBuf::from("/only")]), &extra);
+        assert_eq!(
+            replaced,
+            vec![PathBuf::from("/only"), PathBuf::from("/srv/data")],
+            "an explicit list replaces the defaults but still takes the extras"
+        );
+    }
+
+    #[test]
+    fn duplicate_roots_collapse_to_one_banner_entry() {
+        let roots = resolve_roots(
+            Some(vec![PathBuf::from("/a"), PathBuf::from("/b")]),
+            &[PathBuf::from("/a")],
+        );
+        assert_eq!(roots, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
+
+    /// `notify` maps the inotify budget being exhausted to its own error
+    /// kind rather than the kernel's ENOSPC, so matching on the io error
+    /// would silently never fire and users would keep seeing "OS file
+    /// watch limit reached" with no next step.
+    #[test]
+    fn an_exhausted_watch_budget_names_the_knob_that_fixes_it() {
+        let e = notify::Error {
+            kind: notify::ErrorKind::MaxFilesWatch,
+            paths: Vec::new(),
+        };
+        let msg = describe_watch_error(Path::new("/big/tree"), &e);
+        assert!(msg.contains("/big/tree"), "{msg}");
+        assert!(msg.contains("recursive"), "{msg}");
+        #[cfg(target_os = "linux")]
+        assert!(msg.contains("max_user_watches"), "{msg}");
+    }
+
+    /// The failure that actually happens on a stock systemd box: `/tmp` is
+    /// a default root, and a single root-owned `systemd-private-*`
+    /// directory inside it fails the recursive watch of the whole tree.
+    /// The bare error blames `/tmp`; the descendant is the real subject.
+    #[test]
+    fn a_permission_error_names_the_directory_that_actually_failed() {
+        let e = notify::Error {
+            kind: notify::ErrorKind::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            paths: vec![PathBuf::from("/tmp/systemd-private-abc")],
+        };
+        let msg = describe_watch_error(Path::new("/tmp"), &e);
+        assert!(msg.contains("/tmp/systemd-private-abc"), "{msg}");
+        assert!(msg.contains("recursive"), "{msg}");
+        // The debug-formatted path list `notify` appends must not survive.
+        assert!(!msg.contains('['), "{msg}");
+    }
+
+    /// A root that doesn't exist has to be reported, and it must not stop
+    /// the roots on either side of it from being watched. This is the
+    /// failure mode that arrives with user-supplied paths: one typo in a
+    /// list of three.
+    #[test]
+    fn a_bad_root_is_named_without_silencing_the_good_ones() {
+        // A directory of our own, not the shared temp root: watching is
+        // recursive, and pointing it at whatever else is in /tmp can
+        // exhaust the inotify budget and fail the good root too.
+        let dir = std::env::temp_dir().join(format!("diskwatch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let missing = dir.join("diskwatch-does-not-exist-49bd2f");
+        let w = HotFileWatcher::start(&[dir.as_path(), missing.as_path()]);
+        let (_, roots, err) = w.snapshot_meta();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(roots, vec![dir.clone()], "the good root is still watched");
+        let err = err.expect("the missing root should be reported");
+        assert!(
+            err.contains("diskwatch-does-not-exist-49bd2f"),
+            "the error should name the offending path, got: {err}"
+        );
+    }
 }

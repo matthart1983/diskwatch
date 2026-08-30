@@ -1891,9 +1891,13 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
     }
     if total == 0 {
         let (_, roots, err) = app.hot_files.snapshot_meta();
-        let msg = match err {
-            Some(e) => format!("file watcher unavailable: {e}"),
-            None => format!("watching {} root(s) — nothing has changed yet", roots.len()),
+        let msg = match (err, roots.len()) {
+            // Some roots watched *and* an error means a partial failure —
+            // one bad path in a configured list. Saying the watcher is
+            // unavailable would be wrong; most of it is working.
+            (Some(e), n) if n > 0 => format!("watching {n} root(s) — {e}"),
+            (Some(e), _) => format!("file watcher unavailable: {e}"),
+            (None, n) => format!("watching {n} root(s) — nothing has changed yet"),
         };
         br::text(
             buf,

@@ -127,6 +127,12 @@ Rust 1.75+.
 | `--theme` | `terminal` (default), `dark`, `light`, `ocean`, `solarized`, `dracula`, `nord` |
 | `--graph` | `bars` (default) or `dots` for btop-style braille |
 | `--graph-fade` | btop's brightness gradient and dot grid — needs an RGB theme, so pair with `--theme dark` |
+| `--no-graph-fade` | Turn the gradient off, against a config file that turns it on |
+| `--watch PATH` | Watch this path in Hot Files **instead of** the defaults. Repeatable |
+| `--watch-add PATH` | Watch this path **in addition to** the defaults. Repeatable |
+| `--config PATH` | Read this config file instead of the default location |
+| `--no-config` | Ignore any config file and run on built-in defaults |
+| `--write-config` | Write a commented config file listing every setting, then exit |
 | `--diag` | Print collected state and exit, no TUI |
 
 **diskwatch defers to your terminal's palette by default.** It pins no colours of its
@@ -138,8 +144,63 @@ Pass `--theme dark` for diskwatch's own designed palette, or any of the other bu
 Those pin real RGB, which is what `--graph-fade` needs to fade through — a 16-colour
 palette has no intermediate shades, so the gradient does nothing under the default.
 
-Theme and graph style are also live in the settings overlay; neither persists between runs,
-so use the flag to make one stick.
+Theme and graph style are also live in the settings overlay. Changes there last for the
+session; the config file below is what makes one stick.
+
+## Config
+
+diskwatch runs with zero config. If you want one anyway:
+
+```
+diskwatch --write-config
+```
+
+writes a commented file listing every setting at its default, to
+`$XDG_CONFIG_HOME/diskwatch/config.toml` (`~/.config/diskwatch/config.toml` if that's
+unset — macOS included). `$DISKWATCH_CONFIG` or `--config PATH` points elsewhere;
+`--no-config` ignores it entirely.
+
+```toml
+theme = "nord"
+view = "dense"
+tab = "hot"
+smart_interval_secs = 60
+temp_unit = "fahrenheit"
+columns = ["size", "free", "used_pct", "temp", "smart"]
+
+# Hot Files roots. Replaces the defaults ($HOME plus the OS log and tmp dirs).
+watch_paths = ["~/src", "/var/log"]
+# ...or keep the defaults and add to them.
+extra_watch_paths = ["/srv/data"]
+```
+
+**Precedence: CLI flag > environment variable > config file > built-in default.** A flag
+you just typed always beats a file you wrote months ago.
+
+Nothing in the file is fatal. An unknown key, an unparseable value, an unreadable file:
+each becomes a warning on stderr, the rest of the file still applies, and diskwatch still
+starts. `--diag` reprints the warnings, and the settings overlay says how many there were.
+
+The format is a deliberate subset of TOML — flat `key = value`, `#` comments, no tables —
+so diskwatch parses it without taking on a dependency that would move its MSRV. Every file
+it accepts is also valid TOML.
+
+### Watch paths
+
+The Hot Files tab watches `$HOME` plus the OS log and tmp directories by default. To point
+it somewhere else, in descending precedence:
+
+```
+diskwatch --watch ~/src --watch /var/log     # replace the defaults
+diskwatch --watch-add /srv/data              # keep them, add one
+DISKWATCH_WATCH_PATHS=/srv:/var/log diskwatch
+```
+
+Each root is watched recursively, which on Linux costs one inotify watch per directory
+underneath it. Point it at a large tree and you can exhaust
+`fs.inotify.max_user_watches` — diskwatch names the path and says so rather than
+reporting the kernel's bare "No space left on device", which sends people looking at
+`df`. A root that doesn't exist is named too, and doesn't stop the others being watched.
 
 ## What's real, what's deferred
 

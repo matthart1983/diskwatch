@@ -48,18 +48,23 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("watch", Style::default().fg(p::dim())),
         Span::raw("  "),
     ];
-    if let Some(e) = &err {
-        spans.push(Span::styled(
-            format!("ERROR: {}", e),
-            Style::default().fg(p::red()).add_modifier(Modifier::BOLD),
-        ));
-    } else if roots.is_empty() {
+    // Roots and errors are drawn together, not either/or. One bad path in
+    // a configured list used to hide every good one behind its error,
+    // which read as "nothing is being watched" when most of it was.
+    if roots.is_empty() {
         spans.push(Span::styled("(no roots)", Style::default().fg(p::dim())));
     } else {
         let joined: Vec<String> = roots.iter().map(|p| p.display().to_string()).collect();
         spans.push(Span::styled(
             joined.join("  "),
             Style::default().fg(p::fg()),
+        ));
+    }
+    if let Some(e) = &err {
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(
+            format!("ERROR: {}", e),
+            Style::default().fg(p::red()).add_modifier(Modifier::BOLD),
         ));
     }
     spans.push(Span::raw("   "));

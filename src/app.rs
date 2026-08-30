@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -32,11 +33,47 @@ pub const MIN_SMART_INTERVAL_SECS: u64 = 5;
 /// Step size for `+`/`-` interval nudges, in seconds.
 pub const INTERVAL_STEP_SECS: u64 = 60;
 
+/// Everything the CLI, the environment and the config file have already
+/// agreed on by the time the TUI starts. Resolving precedence is main.rs's
+/// job; by the time an `Options` exists, every value is final.
 pub struct Options {
-    pub start_tab: Option<String>,
+    pub start_tab: TabId,
     /// Which view to open in. Opt-in only — the full 8-tab TUI stays the
     /// default at every terminal size.
     pub view: ViewMode,
+    pub smart_interval_secs: u64,
+    pub temp_unit: TempUnit,
+    pub visible_columns: VisibleColumns,
+    /// Roots for the Hot Files watcher, already resolved and expanded.
+    pub watch_roots: Vec<PathBuf>,
+    /// The config file these came from, if there was one. Shown in the
+    /// settings overlay so "where do I make this stick?" is answered on
+    /// screen rather than in the README.
+    pub config_source: Option<PathBuf>,
+    /// Problems found while reading that file. Also printed to stderr
+    /// before the alternate screen opens, but the overlay is where a user
+    /// who missed that scrollback will look.
+    pub config_warnings: Vec<String>,
+}
+
+impl Options {
+    /// Every setting at its built-in default, opening on `start_tab` in
+    /// `view`. Only the tests build an `Options` this way — main.rs always
+    /// has resolved values for every field, and going through here would
+    /// mean computing defaults it is about to overwrite.
+    #[cfg(test)]
+    pub fn new(start_tab: TabId, view: ViewMode) -> Self {
+        Self {
+            start_tab,
+            view,
+            smart_interval_secs: DEFAULT_SMART_INTERVAL_SECS,
+            temp_unit: TempUnit::Celsius,
+            visible_columns: VisibleColumns(VisibleColumns::ALL),
+            watch_roots: collect::hot_files::default_roots(),
+            config_source: None,
+            config_warnings: Vec::new(),
+        }
+    }
 }
 
 /// Which view is on screen. Lite and Dense are modes, not tabs: each has
@@ -228,6 +265,10 @@ pub struct App {
     /// of the elapsed-since-last interval.
     pub smart_refresh_requested: bool,
     pub should_quit: bool,
+    /// The config file the startup settings came from, if any.
+    pub config_source: Option<PathBuf>,
+    /// Problems found reading it. Surfaced in the settings overlay.
+    pub config_warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -240,20 +281,27 @@ impl App {
     pub fn new_for_test(start: TabId, view: ViewMode) -> Self {
         Self::new(start, view)
     }
+    /// Defaults everywhere — the no-config, no-flags startup, and what the
+    /// tests build. Real startup goes through [`App::with_options`].
+    #[cfg(test)]
     fn new(start: TabId, view: ViewMode) -> Self {
+        Self::with_options(Options::new(start, view))
+    }
+
+    fn with_options(opts: Options) -> Self {
         let devices = collect::devices::collect();
         let filesystems = collect::filesystems::collect();
         let volumes = collect::volumes::collect();
         let io = collect::IoCollector::new();
         let mut smart = collect::SmartCollector::new();
-        smart.set_interval(Duration::from_secs(DEFAULT_SMART_INTERVAL_SECS));
+        smart.set_interval(Duration::from_secs(opts.smart_interval_secs));
         smart.refresh_if_due(&devices);
-        let roots = collect::hot_files::default_roots();
-        let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+        let root_refs: Vec<&std::path::Path> =
+            opts.watch_roots.iter().map(|p| p.as_path()).collect();
         let hot_files = collect::hot_files::HotFileWatcher::start(&root_refs);
         Self {
-            active_tab: start,
-            view,
+            active_tab: opts.start_tab,
+            view: opts.view,
             lite: crate::ui::lite::LiteState::default(),
             dense: crate::ui::dense::DenseState::default(),
             last_area: Rect::new(0, 0, 0, 0),
@@ -271,15 +319,17 @@ impl App {
             insights: Vec::new(),
             last_metadata_refresh: Instant::now(),
             last_usage_refresh: Instant::now(),
-            smart_interval_secs: DEFAULT_SMART_INTERVAL_SECS,
-            smart_interval_label: format_smart_label(DEFAULT_SMART_INTERVAL_SECS),
+            smart_interval_secs: opts.smart_interval_secs,
+            smart_interval_label: format_smart_label(opts.smart_interval_secs),
             show_help: false,
             show_settings: false,
             settings_cursor: 0,
-            visible_columns: VisibleColumns(VisibleColumns::ALL),
-            temp_unit: TempUnit::Celsius,
+            visible_columns: opts.visible_columns,
+            temp_unit: opts.temp_unit,
             smart_refresh_requested: false,
             should_quit: false,
+            config_source: opts.config_source,
+            config_warnings: opts.config_warnings,
         }
     }
 
@@ -343,12 +393,7 @@ impl App {
 }
 
 pub fn run(opts: Options) -> Result<()> {
-    let start = opts
-        .start_tab
-        .as_deref()
-        .and_then(TabId::from_str)
-        .unwrap_or(TabId::Overview);
-    let mut app = App::new(start, opts.view);
+    let mut app = App::with_options(opts);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1319,6 +1364,43 @@ fn settings_rows(app: &App) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Shorten a path for display by folding `$HOME` back to `~`. The overlay
+/// is 60 columns wide and truncates, and a home-relative config path is
+/// both shorter and more recognisable than the absolute one.
+pub fn tilde(path: &std::path::Path) -> String {
+    let display = path.display().to_string();
+    let Some(home) = std::env::var_os("HOME") else {
+        return display;
+    };
+    let home = std::path::PathBuf::from(home).display().to_string();
+    if home.is_empty() {
+        return display;
+    }
+    match display.strip_prefix(&home) {
+        Some(rest) => format!("~{rest}"),
+        None => display,
+    }
+}
+
+/// The lines under the settings list. The overlay's whole job is to change
+/// settings, so it has to answer the obvious next question — how do I keep
+/// these? — and report a config file it couldn't fully read, which is
+/// otherwise only visible in stderr the alternate screen has covered.
+fn settings_footer(app: &App) -> Vec<String> {
+    let mut out = vec!["  (changes last for this session only)".to_string()];
+    match &app.config_source {
+        Some(path) => out.push(format!("  persist them in {}", tilde(path))),
+        None => out.push("  `diskwatch --write-config` starts a config file".to_string()),
+    }
+    if !app.config_warnings.is_empty() {
+        out.push(format!(
+            "  config: {} problem(s) — `diskwatch --diag` lists them",
+            app.config_warnings.len()
+        ));
+    }
+    out
+}
+
 fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     use ratatui::style::Modifier;
     use ratatui::text::{Line, Span};
@@ -1330,8 +1412,12 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         return;
     }
 
+    let footer = settings_footer(app);
     let popup_w = SETTINGS_POPUP_W.min(area.width.saturating_sub(4));
-    let popup_h = (SETTINGS_ROWS as u16 + 6).min(area.height.saturating_sub(4));
+    // header + blank + rows + blank + footer, inside a 1-cell border:
+    // SETTINGS_ROWS + 5 content lines plus one per footer line.
+    let popup_h =
+        (SETTINGS_ROWS as u16 + 5 + footer.len() as u16).min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup = Rect {
@@ -1403,10 +1489,19 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  (settings persist for this session only)",
-        Style::default().fg(p::dim()),
-    )));
+    for (i, text) in footer.iter().enumerate() {
+        // The warnings line is last and is the only one that reports a
+        // problem, so it is the only one that gets a problem's color.
+        let color = if i + 1 == footer.len() && !app.config_warnings.is_empty() {
+            p::red()
+        } else {
+            p::dim()
+        };
+        lines.push(Line::from(Span::styled(
+            crate::ui::lite::truncate_end(text, popup_w.saturating_sub(2)),
+            Style::default().fg(color),
+        )));
+    }
 
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -1461,6 +1556,57 @@ mod tests {
         );
         // Leave the global as we found it.
         crate::ui::graph::set_fade(before);
+    }
+
+    /// The overlay is where someone goes to change a setting, so it has to
+    /// answer "how do I keep this?" — and report a config file it could not
+    /// fully read, which otherwise only exists in stderr the alternate
+    /// screen has already covered.
+    #[test]
+    fn the_settings_overlay_names_the_config_file_and_its_problems() {
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        app.show_settings = true;
+
+        // No config file yet: point at the flag that makes one.
+        let render = |app: &App| {
+            let backend = TestBackend::new(130, 40);
+            let mut term = Terminal::new(backend).expect("terminal");
+            term.draw(|f| super::draw_settings_overlay(f, Rect::new(0, 0, 130, 40), app))
+                .expect("draw");
+            let buf = term.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let out = render(&app);
+        assert!(
+            out.contains("--write-config"),
+            "with no config file the overlay should say how to start one"
+        );
+
+        app.config_source = Some(std::path::PathBuf::from("/etc/diskwatch/config.toml"));
+        app.config_warnings = vec!["line 3: unknown key \"colours\"".to_string()];
+        let out = render(&app);
+        assert!(
+            out.contains("/etc/diskwatch/config.toml"),
+            "the overlay should name the file settings persist in"
+        );
+        assert!(
+            out.contains("1 problem"),
+            "a config warning has to be visible somewhere the user will look"
+        );
+        // The popup grows with the footer; if the height math drifts, the
+        // last line falls outside the border and vanishes silently.
+        assert!(
+            out.contains("--diag"),
+            "the last footer line was clipped by the popup border"
+        );
     }
 
     #[test]
