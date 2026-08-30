@@ -7,7 +7,7 @@ rustPlatform.buildRustPackage {
   pname = "diskwatch";
   # Keep in sync with Cargo.toml's `version` on every release — the Nix
   # derivation label otherwise drifts from the actual source contents.
-  version = "0.1.2";
+  version = "0.5.0";
 
   src = lib.cleanSource ./.;
 
