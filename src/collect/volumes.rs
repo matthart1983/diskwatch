@@ -58,7 +58,6 @@ pub struct ApfsVolume {
     pub role: String,
     pub mount_point: Option<String>,
     pub consumed_bytes: u64,
-    pub filevault: bool,
 }
 
 pub fn collect() -> VolumeTick {
@@ -68,9 +67,10 @@ pub fn collect() -> VolumeTick {
     }
     #[cfg(target_os = "linux")]
     {
-        let mut out = VolumeTick::default();
-        out.mdraid = linux_mdraid();
-        return out;
+        VolumeTick {
+            mdraid: linux_mdraid(),
+            ..Default::default()
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -189,13 +189,6 @@ fn macos_collect() -> VolumeTick {
         if let Some(rest) = trimmed.strip_prefix("Capacity Consumed:") {
             if let Some(v) = cur_volume.as_mut() {
                 v.consumed_bytes = first_byte_count(rest);
-            }
-            continue;
-        }
-        // "FileVault:                 Yes (Unlocked)"
-        if let Some(rest) = trimmed.strip_prefix("FileVault:") {
-            if let Some(v) = cur_volume.as_mut() {
-                v.filevault = rest.trim_start().starts_with("Yes");
             }
             continue;
         }
@@ -404,6 +397,7 @@ fn parse_progress(line: &str) -> Option<MdRaidProgress> {
 
 /// Extracts the first byte count from a line like
 /// "   319709114368 B (319.7 GB) (32.1% used)" → 319_709_114_368.
+#[cfg(target_os = "macos")]
 fn first_byte_count(s: &str) -> u64 {
     let mut digits = String::new();
     for ch in s.chars() {

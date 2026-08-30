@@ -27,7 +27,6 @@ pub struct LinuxDevice {
     pub serial: Option<String>,
     pub size_bytes: u64,
     pub removable: bool,
-    pub rotational: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,7 +62,7 @@ pub fn collect() -> Vec<LinuxDevice> {
         out.push(device);
     }
     // Largest first, matching the macOS ordering.
-    out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    out.sort_by_key(|d| std::cmp::Reverse(d.size_bytes));
     out
 }
 
@@ -119,7 +118,6 @@ fn parse_block(base: &Path, name: &str) -> LinuxDevice {
         serial,
         size_bytes: size_sectors.saturating_mul(SECTOR_BYTES),
         removable,
-        rotational,
     }
 }
 

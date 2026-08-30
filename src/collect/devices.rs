@@ -104,7 +104,7 @@ pub fn collect() -> Vec<DeviceTick> {
                 }
             })
             .collect();
-        out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        out.sort_by_key(|d| std::cmp::Reverse(d.size_bytes));
         out
     }
 
@@ -145,8 +145,8 @@ pub fn collect() -> Vec<DeviceTick> {
                 }
             })
             .collect();
-        out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-        return out;
+        out.sort_by_key(|d| std::cmp::Reverse(d.size_bytes));
+        out
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -181,7 +181,7 @@ pub fn collect() -> Vec<DeviceTick> {
                 }
             }
         }
-        out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        out.sort_by_key(|d| std::cmp::Reverse(d.size_bytes));
         out
     }
 }
