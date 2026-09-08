@@ -74,6 +74,7 @@ brew install diskwatch                # macOS / Linux
 nix-shell -p diskwatch                # NixOS / Nix
 paru -S diskwatch                     # Arch
 cargo install diskwatch               # anywhere with Rust
+x eget use matthart1983/diskwatch     # prebuilt release binary
 ```
 
 Or a pre-built binary from [Releases](https://github.com/matthart1983/diskwatch/releases/latest)
