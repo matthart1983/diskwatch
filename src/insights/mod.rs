@@ -93,7 +93,7 @@ pub fn evaluate(
 fn capacity_critical(fs: &[FsTick]) -> Option<Insight> {
     let crit: Vec<&FsTick> = fs
         .iter()
-        .filter(|m| m.size_bytes > 0 && used_pct(m) >= 90)
+        .filter(|m| !m.ignored && m.size_bytes > 0 && used_pct(m) >= 90)
         .collect();
     if crit.is_empty() {
         return None;
@@ -118,7 +118,7 @@ fn capacity_warning(fs: &[FsTick]) -> Option<Insight> {
     let warn: Vec<&FsTick> = fs
         .iter()
         .filter(|m| {
-            m.size_bytes > 0 && {
+            !m.ignored && m.size_bytes > 0 && {
                 let p = used_pct(m);
                 (80..90).contains(&p)
             }
@@ -359,4 +359,40 @@ fn used_pct(m: &FsTick) -> u32 {
         return 0;
     }
     (m.used_bytes as f64 / m.size_bytes as f64 * 100.0).round() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fs(mount: &str, pct: u64, ignored: bool) -> FsTick {
+        FsTick {
+            mount: mount.to_string(),
+            device: "test".into(),
+            fs_type: "test".into(),
+            size_bytes: 100,
+            used_bytes: pct,
+            avail_bytes: 100 - pct,
+            inode_pct: None,
+            is_removable: false,
+            is_system: false,
+            ro_image: ignored,
+            ignored,
+        }
+    }
+
+    #[test]
+    fn ignored_mounts_raise_no_capacity_alerts() {
+        let mounts = [fs("/tmp/.mount_app", 100, true), fs("/mnt/old", 85, true)];
+        assert!(capacity_critical(&mounts).is_none());
+        assert!(capacity_warning(&mounts).is_none());
+    }
+
+    #[test]
+    fn real_mounts_still_alert_beside_ignored_ones() {
+        let mounts = [fs("/tmp/.mount_app", 100, true), fs("/data", 95, false)];
+        let crit = capacity_critical(&mounts).expect("critical insight");
+        assert!(crit.body.iter().any(|l| l.contains("/data")));
+        assert!(!crit.body.iter().any(|l| l.contains(".mount_app")));
+    }
 }

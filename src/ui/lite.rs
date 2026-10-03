@@ -488,7 +488,7 @@ pub fn capacity_focus(app: &App) -> (Option<MountState>, Option<MountState>) {
     let real: Vec<&crate::collect::FsTick> = app
         .filesystems
         .iter()
-        .filter(|f| f.size_bytes > 0)
+        .filter(|f| f.size_bytes > 0 && !f.ignored)
         .collect();
 
     let root = real.iter().find(|f| f.mount == "/").map(|f| state_of(f));

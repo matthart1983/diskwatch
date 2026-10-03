@@ -265,6 +265,10 @@ fn main() -> Result<()> {
         eprintln!("diskwatch: config: {w}");
     }
 
+    collect::filesystems::set_ignore_rules(collect::filesystems::IgnoreRules {
+        fs_types: cfg.ignore_fs_types.clone(),
+        mounts: cfg.ignore_mounts.clone(),
+    });
     let r = resolve(&cli, &cfg, env_watch_paths());
     let watch_roots = collect::hot_files::resolve_roots(r.watch_replace.clone(), &r.watch_extra);
 

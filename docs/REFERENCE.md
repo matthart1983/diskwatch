@@ -176,6 +176,11 @@ columns = ["size", "free", "used_pct", "temp", "smart"]
 watch_paths = ["~/src", "/var/log"]
 # ...or keep the defaults and add to them.
 extra_watch_paths = ["/srv/data"]
+
+# Read-only images (squashfs, AppImage, ISO) are always full: they show dimmed
+# as "RO image" and never raise capacity alerts. Ignore more of your own.
+ignore_fs_types = ["nfs"]
+ignore_mounts = ["/mnt/backup"]
 ```
 
 **Precedence: CLI flag > environment variable > config file > built-in default.** A flag

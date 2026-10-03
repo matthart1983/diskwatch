@@ -1493,7 +1493,7 @@ fn vol_rows(app: &App) -> Vec<VolRow> {
     let mut rows: Vec<VolRow> = app
         .filesystems
         .iter()
-        .filter(|f| f.size_bytes > 0)
+        .filter(|f| f.size_bytes > 0 && !f.ignored)
         .map(|f| {
             let g = app.growth.growth(&f.mount, f.used_bytes, f.size_bytes);
             VolRow {
@@ -2482,6 +2482,8 @@ mod tests {
             inode_pct: None,
             is_removable: false,
             is_system: false,
+            ro_image: false,
+            ignored: false,
         };
 
         let mut app = App::new_for_test(TabId::Overview, ViewMode::Dense);
