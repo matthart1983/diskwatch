@@ -135,8 +135,14 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
     } else {
         0
     };
-    let used_col = usage_color(used_pct);
-    let dot_col = if m.size_bytes == 0 {
+    // Ignored mounts (read-only images) are full by construction; dim them
+    // rather than hide them, so they don't read as alerts.
+    let used_col = if m.ignored {
+        p::dim()
+    } else {
+        usage_color(used_pct)
+    };
+    let dot_col = if m.size_bytes == 0 || m.ignored {
         p::dim()
     } else if used_pct >= 90 {
         p::red()
@@ -166,7 +172,11 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
         Span::raw(" "),
         Span::styled(
             pad_right(&m.mount, 30),
-            Style::default().fg(if m.size_bytes == 0 { p::dim() } else { p::fg() }),
+            Style::default().fg(if m.size_bytes == 0 || m.ignored {
+                p::dim()
+            } else {
+                p::fg()
+            }),
         ),
         Span::styled(pad_right(dev_short, 18), Style::default().fg(p::dim())),
         Span::styled(pad_right(&m.fs_type, 8), Style::default().fg(p::cyan())),
@@ -191,7 +201,11 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
     let bar_x = x + 70;
     let bar_w = 18u16;
     let filled = ((used_pct as f64 / 100.0) * bar_w as f64).round() as u16;
-    let bar_col = usage_bar_color(used_pct);
+    let bar_col = if m.ignored {
+        p::dim()
+    } else {
+        usage_bar_color(used_pct)
+    };
     let bar_spans: Vec<Span> = (0..bar_w)
         .map(|i| {
             if i < filled {
@@ -227,6 +241,16 @@ fn draw_fs_row(f: &mut Frame, x: u16, y: u16, w: u16, m: &FsTick, selected: bool
                     .unwrap_or_else(|| "—".to_string()),
                 5,
             ),
+            Style::default().fg(p::dim()),
+        ),
+        Span::styled(
+            if m.ro_image {
+                "  RO image"
+            } else if m.ignored {
+                "  ignored"
+            } else {
+                ""
+            },
             Style::default().fg(p::dim()),
         ),
     ]);

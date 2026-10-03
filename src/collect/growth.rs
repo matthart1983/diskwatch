@@ -148,6 +148,8 @@ mod tests {
             inode_pct: None,
             is_removable: false,
             is_system: false,
+            ro_image: false,
+            ignored: false,
         }
     }
 

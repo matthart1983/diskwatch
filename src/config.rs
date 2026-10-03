@@ -59,6 +59,8 @@ pub const KNOWN_KEYS: &[&str] = &[
     "columns",
     "watch_paths",
     "extra_watch_paths",
+    "ignore_fs_types",
+    "ignore_mounts",
 ];
 
 /// Column spellings accepted by the `columns` key, in table order.
@@ -90,6 +92,11 @@ pub struct Config {
     /// Appended to whatever the roots end up being — the defaults, or a
     /// `watch_paths` list, or a `--watch` flag.
     pub extra_watch_paths: Vec<PathBuf>,
+    /// Filesystem types to leave out of capacity alerts, on top of the
+    /// built-in read-only image detection. Matched case-insensitively.
+    pub ignore_fs_types: Vec<String>,
+    /// Mount points to leave out of capacity alerts. Exact match.
+    pub ignore_mounts: Vec<String>,
     /// The file these settings came from, or `None` if no file was found.
     /// The settings overlay shows it so the answer to "where do I change
     /// this?" is on screen rather than in the README.
@@ -264,6 +271,14 @@ impl Config {
                 Some(items) => self.extra_watch_paths = items.iter().map(expand_path).collect(),
                 None => self.warn(line, &format!("`{key}` expects an array of strings")),
             },
+            "ignore_fs_types" => match parse_array(value) {
+                Some(items) => self.ignore_fs_types = items,
+                None => self.warn(line, &format!("`{key}` expects an array of strings")),
+            },
+            "ignore_mounts" => match parse_array(value) {
+                Some(items) => self.ignore_mounts = items,
+                None => self.warn(line, &format!("`{key}` expects an array of strings")),
+            },
             other => self.warn(
                 line,
                 &format!(
@@ -343,7 +358,13 @@ pub fn default_file_contents() -> String {
          \n\
          # Paths added to whatever the roots already are, rather than\n\
          # replacing them. Use this to keep the defaults and add one more.\n\
-         # extra_watch_paths = [\"/srv/data\"]\n",
+         # extra_watch_paths = [\"/srv/data\"]\n\
+         \n\
+         # Read-only images (squashfs, AppImage mounts, ISOs) are always full,\n\
+         # so they are shown dimmed and never raise capacity alerts. Add more\n\
+         # filesystem types or mount points to leave out of alerts the same way.\n\
+         # ignore_fs_types = [\"nfs\"]\n\
+         # ignore_mounts = [\"/mnt/backup\"]\n",
         ui::theme::THEME_NAMES.join(", "),
         ui::theme::DEFAULT_THEME,
         ui::graph::GRAPH_STYLE_NAMES.join(", "),
@@ -563,6 +584,8 @@ mod tests {
             columns = ["size", "temp"]
             watch_paths = ["/var/log", "/srv"]
             extra_watch_paths = ["/opt"]
+            ignore_fs_types = ["nfs"]
+            ignore_mounts = ["/mnt/backup"]
             "#,
         );
         assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
@@ -583,6 +606,8 @@ mod tests {
             Some(vec![PathBuf::from("/var/log"), PathBuf::from("/srv")])
         );
         assert_eq!(cfg.extra_watch_paths, vec![PathBuf::from("/opt")]);
+        assert_eq!(cfg.ignore_fs_types, vec!["nfs"]);
+        assert_eq!(cfg.ignore_mounts, vec!["/mnt/backup"]);
     }
 
     /// A bad line must not take the file down with it. The alternative —
