@@ -180,6 +180,11 @@ pub fn sys(app: &App) -> Sys {
         stacked: Vec::new(),
     };
     for t in &app.io.latest {
+        // zram isn't a disk, and isn't stacked on one either: it is in
+        // neither the sum nor the stacked count.
+        if crate::collect::devices::is_memory_backed(&t.device) {
+            continue;
+        }
         if !is_physical(app, &t.device) {
             s.stacked.push(t.device.clone());
             continue;
@@ -1020,9 +1025,11 @@ fn dev_rows(app: &App) -> Vec<DevRow> {
             let dev = app.devices.iter().find(|d| d.name == t.device);
             DevRow {
                 name: t.device.clone(),
-                kind: dev
-                    .map(|d| format!("{:?}", d.kind).to_lowercase())
-                    .unwrap_or_else(|| "stack".into()),
+                kind: match dev {
+                    Some(d) => format!("{:?}", d.kind).to_lowercase(),
+                    None if crate::collect::devices::is_memory_backed(&t.device) => "ram".into(),
+                    None => "stack".into(),
+                },
                 size: dev.map(|d| d.size_bytes).unwrap_or(0),
                 read: r,
                 write: w,
@@ -2461,6 +2468,55 @@ mod tests {
         ring.push_back(6.0);
         let w = window(&ring, 5);
         assert_eq!(w, vec![0.0, 0.0, 0.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn zram_is_neither_summed_nor_called_stacked() {
+        // Issue #25: zram0 is swap in RAM. It keeps its row in the devices
+        // box, labelled for what it is, but its traffic is not disk IO.
+        use crate::app::{App, ViewMode};
+        use crate::collect::io::IoTick;
+        use crate::collect::{DeviceKind, DeviceTick};
+        use crate::tabs::TabId;
+
+        let mut app = App::new_for_test(TabId::Overview, ViewMode::Dense);
+        app.devices = vec![DeviceTick {
+            name: "nvme0n1".into(),
+            kind: DeviceKind::Nvme,
+            model: "—".into(),
+            bus: String::new(),
+            size_bytes: 1_000_000_000_000,
+            used_bytes: 0,
+            is_removable: false,
+            firmware: None,
+            serial: None,
+            smart_ok: None,
+            idle: false,
+        }];
+        let tick = |name: &str, r: f64, w: f64| IoTick {
+            device: name.to_string(),
+            bps: r + w,
+            split: Some((r, w)),
+            ..Default::default()
+        };
+        app.io.latest = vec![
+            tick("nvme0n1", 100.0, 200.0),
+            tick("dm-0", 90.0, 190.0),
+            tick("zram0", 5_000.0, 9_000.0),
+        ];
+        let s = sys(&app);
+        assert_eq!((s.read_bps, s.write_bps), (100.0, 200.0));
+        assert_eq!(s.phys, 1);
+        assert_eq!(s.stacked, vec!["dm-0".to_string()]);
+        let kinds: Vec<(String, String)> = dev_rows(&app)
+            .into_iter()
+            .map(|r| (r.name, r.kind))
+            .collect();
+        assert!(kinds.contains(&("zram0".into(), "ram".into())), "{kinds:?}");
+        assert!(
+            kinds.contains(&("dm-0".into(), "stack".into())),
+            "{kinds:?}"
+        );
     }
 
     #[test]

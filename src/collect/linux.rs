@@ -46,15 +46,7 @@ pub fn collect() -> Vec<LinuxDevice> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // Skip loopback / ram / device-mapper / md (md handled by
-        // volumes collector).
-        if name.starts_with("loop")
-            || name.starts_with("ram")
-            || name.starts_with("dm-")
-            || name.starts_with("md")
-            || name.starts_with("zd")
-        // ZFS zvols
-        {
+        if !is_disk(&name) {
             continue;
         }
         let path = entry.path();
@@ -64,6 +56,19 @@ pub fn collect() -> Vec<LinuxDevice> {
     // Largest first, matching the macOS ordering.
     out.sort_by_key(|d| std::cmp::Reverse(d.size_bytes));
     out
+}
+
+/// Whether a `/sys/block` entry is a disk worth listing. Loop devices,
+/// device-mapper, md (the volumes collector's) and ZFS zvols sit on top
+/// of disks that are listed already. zram and brd ram disks are memory.
+/// In issue #25 a 17 GB zram swap device counted toward disk capacity and
+/// showed up as a device of unknown kind.
+fn is_disk(name: &str) -> bool {
+    !(crate::collect::devices::is_memory_backed(name)
+        || name.starts_with("loop")
+        || name.starts_with("dm-")
+        || name.starts_with("md")
+        || name.starts_with("zd"))
 }
 
 fn parse_block(base: &Path, name: &str) -> LinuxDevice {
@@ -134,4 +139,19 @@ fn read_trim(path: &Path) -> Option<String> {
 fn read_u64(path: &Path) -> Option<u64> {
     let s = fs::read_to_string(path).ok()?;
     s.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_and_stacked_block_devices_are_not_disks() {
+        for name in ["zram0", "zram1", "ram0", "loop3", "dm-0", "md127", "zd16"] {
+            assert!(!is_disk(name), "{name} listed as a disk");
+        }
+        for name in ["nvme0n1", "sda", "vdb", "mmcblk0", "xvda", "nbd0", "pmem0"] {
+            assert!(is_disk(name), "{name} dropped");
+        }
+    }
 }

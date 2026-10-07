@@ -14,7 +14,7 @@ a box border.
 | Box | Shows |
 |---|---|
 | **io** | Mirrored read/write throughput on a shared time axis. Peak, average, iops split by direction, mean request size, utilisation, await, p99. |
-| **devices** | Per-device read/write, utilisation, size, type, 48s sparkline. Stacked devices (md, dm, LVM, LUKS) are listed but excluded from totals. |
+| **devices** | Per-device read/write, utilisation, size, type, 48s sparkline. Stacked devices (md, dm, LVM, LUKS) and zram are listed but excluded from totals. |
 | **latency** | Sampled IO latency histogram, seven buckets from `<0.1ms` to `>50ms`, with p50/p95/p99 and the share of ops past 10 ms. Bars are coloured by bucket, not by count, so the tail is visible before it fills. |
 | **volumes** | Capacity meters with a days-to-full projection from observed growth. Silent when a volume is flat or shrinking. |
 | **smart** | Health, wear, host writes, temperature, spare. |

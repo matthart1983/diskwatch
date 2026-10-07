@@ -301,11 +301,12 @@ impl IoCollector {
     ///
     /// A LUKS volume on an NVMe reports its traffic as `dm-0` AND as
     /// `nvme0n1`; summing both double-counts every block, which is a silent
-    /// 2× on exactly the machines that encrypt their disks.
+    /// 2× on exactly the machines that encrypt their disks. Summing zram
+    /// would count swap, which is memory traffic, as disk IO.
     pub fn totals_bps(&self) -> (f64, f64) {
         self.latest
             .iter()
-            .filter(|t| !is_stacked_name(&t.device))
+            .filter(|t| is_summed(&t.device))
             .filter_map(|t| t.split)
             .fold((0.0, 0.0), |(r, w), (dr, dw)| (r + dr, w + dw))
     }
@@ -903,6 +904,12 @@ pub fn is_stacked_name(name: &str) -> bool {
     name.starts_with("dm-") || name.starts_with("md") || name.starts_with("zd")
 }
 
+/// Devices whose traffic belongs in a host-wide disk IO sum: neither
+/// stacked on another disk nor backed by memory.
+fn is_summed(name: &str) -> bool {
+    !is_stacked_name(name) && !crate::collect::devices::is_memory_backed(name)
+}
+
 fn push_ring(q: &mut VecDeque<f64>, v: f64, cap: usize) {
     if q.len() == cap {
         q.pop_front();
@@ -929,7 +936,7 @@ fn percentiles(samples: &VecDeque<f64>) -> (f64, f64, f64) {
 /// Sums device rates for the Overview "AGG IO" panel.
 pub fn aggregate(latest: &[IoTick]) -> (f64, f64) {
     // Physical devices only — see `totals_bps` for why.
-    let phys = || latest.iter().filter(|t| !is_stacked_name(&t.device));
+    let phys = || latest.iter().filter(|t| is_summed(&t.device));
     let combined: f64 = phys().map(|t| t.bps).sum();
     let write: f64 = phys().filter_map(|t| t.split.map(|(_, w)| w)).sum();
     (combined, write)
@@ -1106,6 +1113,8 @@ mod diskstats_tests {
             tick("nvme0n1", 100.0, 200.0),
             tick("dm-0", 90.0, 190.0),
             tick("md0", 10.0, 10.0),
+            // Swap to zram is memory traffic, not disk IO.
+            tick("zram0", 500.0, 900.0),
         ];
         let (combined, write) = aggregate(&latest);
         assert_eq!(combined, 300.0);

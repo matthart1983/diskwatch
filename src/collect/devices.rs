@@ -219,6 +219,14 @@ pub fn collect() -> Vec<DeviceTick> {
     }
 }
 
+/// True for block devices backed by RAM rather than storage: zram (usually
+/// compressed swap) and brd ram disks. They aren't disks, so they stay out
+/// of the device list, capacity totals and summed disk IO. Their own IO
+/// rows remain, since swap traffic is worth seeing.
+pub fn is_memory_backed(name: &str) -> bool {
+    name.starts_with("zram") || name.starts_with("ram")
+}
+
 /// Fast path: re-reads sysinfo and updates `used_bytes` on an existing
 /// device list without redoing the slow `system_profiler` enrichment.
 ///
@@ -921,6 +929,20 @@ mod tests {
         assert_eq!(out.get("sdd"), Some(&third));
         assert_eq!(out.get("sde"), Some(&third));
         assert_eq!(out.len(), 5, "{out:?}");
+    }
+
+    /// Issue #25 listed a 17 GB zram0 beside two NVMe disks, of unknown
+    /// kind, counted in the capacity total. Checked against the real device
+    /// list wherever the tests run (this one has zram0 too, most Fedora and
+    /// Ubuntu installs do).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn memory_backed_devices_are_not_listed() {
+        assert!(is_memory_backed("zram0") && is_memory_backed("ram0"));
+        assert!(!is_memory_backed("nvme0n1") && !is_memory_backed("sda"));
+        for d in collect() {
+            assert!(!is_memory_backed(&d.name), "{} listed as a disk", d.name);
+        }
     }
 
     #[test]
