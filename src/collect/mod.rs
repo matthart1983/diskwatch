@@ -6,6 +6,7 @@ pub mod io;
 pub mod processes;
 pub mod smart;
 pub mod volumes;
+pub mod zfs;
 
 #[cfg(target_os = "macos")]
 pub mod iokit;

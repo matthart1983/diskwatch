@@ -373,6 +373,42 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
         }
     }
 
+    // Pool layout and where each member resolved to: the attribution
+    // above is only as good as this.
+    #[cfg(target_os = "linux")]
+    {
+        let zfs = collect::zfs::probe();
+        println!("\n=== ZFS pools ({}) ===", zfs.pools.len());
+        if let Some(note) = &zfs.note {
+            println!("  {}", note);
+        }
+        for pool in &zfs.pools {
+            println!(
+                "  {}  size={}  alloc={}  free={}  health={}",
+                pool.name, pool.size_bytes, pool.alloc_bytes, pool.free_bytes, pool.health
+            );
+            for v in &pool.vdevs {
+                println!(
+                    "    {}  class={}  size={}  alloc={:?}  health={}",
+                    v.name,
+                    v.class.label(),
+                    v.size_bytes,
+                    v.alloc_bytes,
+                    v.health
+                );
+                for m in &v.members {
+                    println!(
+                        "      {} -> {}  slot={}  health={}",
+                        m.path,
+                        m.dev.as_deref().unwrap_or("(unresolved)"),
+                        m.slot,
+                        m.health
+                    );
+                }
+            }
+        }
+    }
+
     println!(
         "\n=== Filesystems ({}) ===",
         collect::filesystems::collect().len()

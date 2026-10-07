@@ -1,13 +1,20 @@
 //! Volumes collector — APFS containers (macOS), parsed from
-//! `diskutil apfs list` text output.
+//! `diskutil apfs list` text output; mdraid arrays from `/proc/mdstat` and
+//! ZFS pools from `zpool list` (Linux).
 //!
-//! Linux mdraid / ZFS / LVM collection is deferred. On non-macOS this
-//! returns an empty list; the tab renders an explanatory banner.
+//! LVM collection is deferred. With nothing to list, the tab renders an
+//! explanatory banner.
+
+use crate::collect::zfs::ZfsPool;
 
 #[derive(Debug, Clone, Default)]
 pub struct VolumeTick {
     pub containers: Vec<ApfsContainer>,
     pub mdraid: Vec<MdRaidArray>,
+    pub zfs: Vec<ZfsPool>,
+    /// Why ZFS pools are missing when ZFS is loaded but `zpool` couldn't
+    /// list them. One line in the tab.
+    pub zfs_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,8 +74,11 @@ pub fn collect() -> VolumeTick {
     }
     #[cfg(target_os = "linux")]
     {
+        let zfs = crate::collect::zfs::probe();
         VolumeTick {
             mdraid: linux_mdraid(),
+            zfs: zfs.pools,
+            zfs_note: zfs.note,
             ..Default::default()
         }
     }

@@ -11,8 +11,13 @@ use std::collections::HashMap;
 
 use sysinfo::Disks;
 
+use crate::collect::zfs::ZfsPool;
+
 #[cfg(target_os = "macos")]
 use crate::collect::macos;
+
+#[cfg(target_os = "linux")]
+use crate::collect::zfs;
 
 #[cfg(target_os = "linux")]
 use crate::collect::linux;
@@ -280,7 +285,29 @@ fn linux_used_by_device() -> HashMap<String, u64> {
         }
     }
     let bmap = bcachefs_member_map();
-    attribute_sources(&by_source, &sysfs_slaves, &|m: &str| bmap.get(m).cloned())
+    attribute_usage(
+        &by_source,
+        &zfs::probe().pools,
+        &sysfs_slaves,
+        &|m: &str| bmap.get(m).cloned(),
+    )
+}
+
+/// Everything each disk holds: mounted filesystems through
+/// [`attribute_sources`], plus ZFS pools through [`attribute_zfs_pools`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn attribute_usage(
+    by_source: &HashMap<String, u64>,
+    pools: &[ZfsPool],
+    slaves: &dyn Fn(&str) -> Option<Vec<String>>,
+    bcachefs_members: &dyn Fn(&str) -> Option<Vec<String>>,
+) -> HashMap<String, u64> {
+    let mut out = attribute_sources(by_source, slaves, bcachefs_members);
+    for (disk, used) in attribute_zfs_pools(pools, slaves) {
+        let entry = out.entry(disk).or_insert(0);
+        *entry = entry.saturating_add(used);
+    }
+    out
 }
 
 /// Attribute per-mount-source used bytes to whole-disk device names.
@@ -291,7 +318,8 @@ fn linux_used_by_device() -> HashMap<String, u64> {
 /// - `/dev/md0`, `/dev/mapper/vg-lv` — stacked devices → resolved to their
 ///   member disks via `slaves`.
 /// - `overlay`, `tmpfs`, ZFS datasets — no `/dev/` source → attributed to
-///   nothing rather than to everything.
+///   nothing rather than to everything. ZFS usage is counted per pool by
+///   [`attribute_zfs_pools`] instead.
 ///
 /// statfs totals are filesystem-wide, so a filesystem spanning N disks is
 /// split evenly — per-member truth isn't knowable from statfs alone.
@@ -381,6 +409,52 @@ fn attribute_sources(
 
     for (members, used) in bcachefs_fs {
         spread(&mut out, &members, used);
+    }
+    out
+}
+
+/// Attribute every imported ZFS pool's allocation to the whole disks it
+/// lives on (issue #25).
+///
+/// A dataset's mount source (`rpool/ROOT/ubuntu`) names no device, so
+/// [`attribute_sources`] drops it, and a root-on-ZFS machine read 0% on
+/// every disk. This works from the pools rather than the mounts: ALLOC
+/// from `zpool list` is the pool-level truth. Summing each dataset's
+/// statfs would miss snapshots and unmounted datasets and still not say
+/// which disks hold the blocks; going by pool, a pool mounted at ten places
+/// is one pool and counts once.
+///
+/// Per top-level vdev, see [`ZfsVdev::member_shares`]: mirror members each
+/// hold the vdev's whole allocation, raidz and dRAID members an even share
+/// of it, and cache and spare vdevs nothing. Members resolve to disks like
+/// any other source: a partition folds to its disk, a dm node (ZFS on
+/// LUKS) expands through `slaves`, and a member backed by several disks is
+/// split evenly across them.
+///
+/// [`ZfsVdev::member_shares`]: crate::collect::zfs::ZfsVdev::member_shares
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn attribute_zfs_pools(
+    pools: &[ZfsPool],
+    slaves: &dyn Fn(&str) -> Option<Vec<String>>,
+) -> HashMap<String, u64> {
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for vdev in pools.iter().flat_map(|p| &p.vdevs) {
+        for (member, bytes) in vdev.member_shares() {
+            // A GUID (device gone) or a file vdev owns no disk here.
+            let Some(dev) = &member.dev else {
+                continue;
+            };
+            let path = format!("/dev/{dev}");
+            let disks = match slaves(&path) {
+                Some(m) if !m.is_empty() => m,
+                _ => vec![short_name(&path)],
+            };
+            let share = bytes / disks.len() as u64;
+            for disk in disks {
+                let entry = out.entry(disk).or_insert(0);
+                *entry = entry.saturating_add(share);
+            }
+        }
     }
     out
 }
@@ -739,6 +813,114 @@ mod tests {
         assert_eq!(out.get("sda"), Some(&750_000));
         assert_eq!(out.get("sdb"), Some(&750_000));
         assert_eq!(out.len(), 2);
+    }
+
+    /// Mount sources as issue #25's machine reports them: every ZFS dataset
+    /// of both pools, plus the one plain partition, /boot/efi.
+    fn issue_25_sources() -> HashMap<String, u64> {
+        sources(&[
+            ("rpool/ROOT/ubuntu", 54_000_000_000),
+            ("rpool/home", 35_000_000_000),
+            ("rpool/opt", 120_000_000),
+            ("rpool/var-cache", 210_000_000),
+            ("rpool/var-lib-docker", 90_000_000),
+            ("rpool/var-log", 60_000_000),
+            ("rpool/var-tmp", 1_000_000),
+            ("bpool/BOOT/ubuntu", 400_000_000),
+            ("/dev/nvme1n1p1", 364_000_000),
+        ])
+    }
+
+    #[test]
+    fn zfs_pools_land_on_both_mirror_disks() {
+        // Issue #25: root on ZFS, bpool and rpool each mirrored across
+        // nvme0n1 and nvme1n1. v0.5.9 dropped every dataset and showed
+        // both disks at 0%, with only /boot/efi's 364 MB counted anywhere.
+        let pools = crate::collect::zfs::fixtures::pools(crate::collect::zfs::fixtures::UBUNTU);
+        let out = attribute_usage(&issue_25_sources(), &pools, &no_slaves, &no_bcachefs);
+        let rpool = 58_128_883_712;
+        let bpool = 412_090_368;
+        assert_eq!(out.get("nvme0n1"), Some(&(rpool + bpool)));
+        // /boot/efi still lands where it lives, on top of the pool share.
+        assert_eq!(out.get("nvme1n1"), Some(&(rpool + bpool + 364_000_000)));
+        assert_eq!(out.len(), 2, "{out:?}");
+    }
+
+    #[test]
+    fn a_pool_mounted_many_times_counts_once() {
+        // Seven rpool datasets are mounted; the pool's ALLOC is what lands,
+        // once, whatever the datasets' own statfs figures add up to.
+        let pools = crate::collect::zfs::fixtures::pools(crate::collect::zfs::fixtures::UBUNTU);
+        let mut by_source = issue_25_sources();
+        let one = attribute_usage(&by_source, &pools, &no_slaves, &no_bcachefs);
+        for i in 0..20 {
+            by_source.insert(format!("rpool/data/vm-{i}"), 9_000_000_000);
+        }
+        let many = attribute_usage(&by_source, &pools, &no_slaves, &no_bcachefs);
+        assert_eq!(one, many);
+    }
+
+    #[test]
+    fn non_zfs_attribution_is_unchanged_without_pools() {
+        let by_source = sources(&[("/dev/sda1", 100), ("/dev/sda2", 250), ("/dev/md0", 400)]);
+        let slaves = |dev: &str| -> Option<Vec<String>> {
+            (dev == "/dev/md0").then(|| vec!["sdb".into(), "sdc".into()])
+        };
+        assert_eq!(
+            attribute_usage(&by_source, &[], &slaves, &no_bcachefs),
+            attribute_sources(&by_source, &slaves, &no_bcachefs)
+        );
+    }
+
+    #[test]
+    fn raidz_and_class_vdevs_attribute_per_member() {
+        use crate::collect::zfs::fixtures::{pools, CLASSES, RAIDZ1};
+        let out = attribute_zfs_pools(&pools(RAIDZ1), &no_slaves);
+        let third = 6_598_134_841_344 / 3;
+        for disk in ["sdb", "sdc", "sdd"] {
+            assert_eq!(out.get(disk), Some(&third), "{disk}");
+        }
+
+        let out = attribute_zfs_pools(&pools(CLASSES), &no_slaves);
+        assert_eq!(out.get("sda"), Some(&1_201_865_441_280));
+        assert_eq!(out.get("sdb"), Some(&1_201_865_441_280));
+        assert_eq!(out.get("nvme0n1"), Some(&48_292_388_864));
+        assert_eq!(out.get("nvme1n1"), Some(&48_292_388_864));
+        // The log's own allocation; its disk's L2ARC partition adds nothing.
+        assert_eq!(out.get("nvme2n1"), Some(&1_310_720));
+        // The idle spare holds no pool data.
+        assert_eq!(out.get("sdc"), None);
+    }
+
+    #[test]
+    fn zfs_on_luks_resolves_through_slaves() {
+        // A pool on /dev/mapper/crypt-* resolves to dm-N; its slaves name
+        // the disk underneath.
+        let mut pools = crate::collect::zfs::fixtures::pools(crate::collect::zfs::fixtures::SINGLE);
+        pools[0].vdevs[0].members[0].dev = Some("dm-0".into());
+        let slaves = |dev: &str| -> Option<Vec<String>> {
+            (dev == "/dev/dm-0").then(|| vec!["nvme0n1".into()])
+        };
+        let out = attribute_zfs_pools(&pools, &slaves);
+        assert_eq!(out.get("nvme0n1"), Some(&412_334_399_488));
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn degraded_pool_members_that_are_gone_get_nothing() {
+        use crate::collect::zfs::fixtures::{pools, DEGRADED};
+        let out = attribute_zfs_pools(&pools(DEGRADED), &no_slaves);
+        // The OFFLINE mirror half still holds its copy.
+        assert_eq!(out.get("nvme0n1"), Some(&58_128_883_712));
+        assert_eq!(out.get("nvme1n1"), Some(&58_128_883_712));
+        // raidz1 has three columns: sdb1, a vanished disk, and spare-2
+        // (sdd1 failed, sde1 covering it). The vanished disk's third goes
+        // nowhere; the swap's halves each hold their column.
+        let third = 6_598_134_841_344 / 3;
+        assert_eq!(out.get("sdb"), Some(&third));
+        assert_eq!(out.get("sdd"), Some(&third));
+        assert_eq!(out.get("sde"), Some(&third));
+        assert_eq!(out.len(), 5, "{out:?}");
     }
 
     #[test]

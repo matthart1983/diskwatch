@@ -61,7 +61,7 @@ diskwatch --diag                # print collected state and exit
 |---|---|---|
 | 1 | Overview | Device summary, aggregate IO and capacity |
 | 2 | Devices | Model, firmware, serial, usage and device details |
-| 3 | Volumes | APFS containers or Linux mdraid state and resync progress |
+| 3 | Volumes | APFS containers, Linux mdraid state and resync progress, ZFS pools and vdevs |
 | 4 | FS | Mounts, capacity and usage thresholds |
 | 5 | IO | Per-device throughput, history and sampled latency |
 | 6 | SMART | Drive health and available NVMe/ATA attributes |
