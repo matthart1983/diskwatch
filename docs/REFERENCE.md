@@ -237,7 +237,7 @@ reporting the kernel's bare "No space left on device", which sends people lookin
 | True per-op p99 | ❌ needs IOReport entitlement | ❌ needs eBPF biolatency |
 | Device utilisation (%util) | ❌ IOKit has no busy-time counter | ✅ `/proc/diskstats` 13 |
 | Requests in flight | ❌ not exposed by IOKit | ✅ `/proc/diskstats` 12 |
-| SMART attributes | ✅ `smartctl` if installed | ✅ `smartctl` if installed |
+| SMART attributes | ✅ `smartctl` if installed | ✅ `smartctl` if installed, as root |
 | Volumes — APFS / mdraid | ✅ `diskutil apfs list` | ✅ `/proc/mdstat` |
 | Volumes — ZFS | ⏳ deferred | ✅ `zpool list -v`, no root needed |
 | Volumes — LVM | ⏳ deferred | ⏳ deferred |

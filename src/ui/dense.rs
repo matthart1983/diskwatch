@@ -1718,14 +1718,21 @@ fn smart_box(buf: &mut Buffer, area: Rect, app: &App) {
         .collect();
     let pass = rows.len() - warn.len();
     let available = app.smart.smartctl_available();
+    // Every polled drive refused us: "2/2 passed" would claim a health
+    // check that never ran.
+    let needs_root = !rows.is_empty() && rows.iter().all(|(_, t)| t.is_some_and(|t| t.needs_root));
     let sub = format!("{} physical", rows.len());
-    let right = if available {
-        format!("{pass}/{} passed", rows.len())
-    } else {
+    let right = if !available {
         "smartctl not installed".to_string()
+    } else if needs_root {
+        "needs root".to_string()
+    } else {
+        format!("{pass}/{} passed", rows.len())
     };
     let foot = if !available {
         "brew install smartmontools".to_string()
+    } else if needs_root {
+        "sudo diskwatch".to_string()
     } else {
         match app.smart.last_refresh_at {
             // Elapsed since the last poll — the configured interval is a
@@ -1743,7 +1750,7 @@ fn smart_box(buf: &mut Buffer, area: Rect, app: &App) {
             title: Some("smart"),
             sub: Some(&sub),
             right: Some(&right),
-            right_fg: Some(if !available {
+            right_fg: Some(if !available || needs_root {
                 p::dim()
             } else if warn.is_empty() {
                 p::green()

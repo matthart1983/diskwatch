@@ -40,7 +40,9 @@ builds, plus Linux armv5te and Windows x86_64.
 [Build from source](docs/REFERENCE.md#install).
 
 Install `smartmontools` for full SMART attribute tables. Without it, SMART reporting
-is limited to the basic health flag where available.
+is limited to the basic health flag where available. On Linux smartctl needs root to
+read a drive, so run `sudo diskwatch` for SMART data; otherwise the SMART columns say
+"needs root".
 
 ## Run
 

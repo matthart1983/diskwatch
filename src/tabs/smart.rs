@@ -40,6 +40,7 @@ fn draw_device_picker(f: &mut Frame, area: Rect, app: &App) {
         let badge = match d.smart_ok {
             Some(true) => ("ok", p::green()),
             Some(false) => ("FAIL", p::red()),
+            None if app.smart.needs_root(&d.name) => ("needs root", p::dim()),
             None => ("—", p::dim()),
         };
         let label = format!("{} {}", d.name, badge.0);
@@ -124,6 +125,11 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
+    if tick.needs_root {
+        draw_needs_root(f, split[1], d);
+        return;
+    }
+
     // Layout the SMART body: top half always shows the headline summary
     // (temp / hours / cycles / wear — what the Overview page's TEMP
     // column also shows). Bottom half shows the per-protocol detail:
@@ -182,6 +188,44 @@ fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {
         Line::from(Span::styled(
             "    Linux:  apt install smartmontools  (or pacman / dnf)",
             Style::default().fg(p::cyan()),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
+        area,
+    );
+}
+
+/// smartctl answered, but only to say it was refused the device. A summary
+/// of empty fields would look like a drive that reports nothing.
+fn draw_needs_root(f: &mut Frame, area: Rect, d: &DeviceTick) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("  smartctl could not open /dev/{}: ", d.name),
+                Style::default().fg(p::dim()),
+            ),
+            Span::styled(
+                "permission denied",
+                Style::default()
+                    .fg(p::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Temperature, wear, power-on hours and the attribute table need root.",
+            Style::default().fg(p::fg()),
+        )),
+        Line::from(Span::styled(
+            "  Relaunch with:",
+            Style::default().fg(p::fg()),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "    sudo diskwatch",
+            Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         )),
     ];
     f.render_widget(
@@ -378,4 +422,87 @@ fn running_as_root() -> bool {
 #[cfg(not(unix))]
 fn running_as_root() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{App, ViewMode};
+    use crate::collect::smart::SmartTick;
+    use crate::collect::{DeviceKind, DeviceTick};
+    use crate::tabs::TabId;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Issue #25's two NVMe disks, polled by a normal user.
+    fn refused_app(tab: TabId) -> App {
+        let mut app = App::new_for_test(tab, ViewMode::Full);
+        app.devices = ["nvme0n1", "nvme1n1"]
+            .iter()
+            .map(|name| DeviceTick {
+                name: name.to_string(),
+                kind: DeviceKind::Nvme,
+                model: "Sabrent".into(),
+                bus: "PCIe / NVMe".into(),
+                size_bytes: 1_000_204_886_016,
+                used_bytes: 0,
+                is_removable: false,
+                firmware: None,
+                serial: None,
+                smart_ok: None,
+                idle: false,
+            })
+            .collect();
+        app.selected_device = 0;
+        app.smart.assume_smartctl();
+        app.smart.by_device.clear();
+        for d in &app.devices {
+            app.smart.by_device.insert(
+                d.name.clone(),
+                SmartTick {
+                    device: d.name.clone(),
+                    needs_root: true,
+                    ..Default::default()
+                },
+            );
+        }
+        app
+    }
+
+    fn render(app: &App) -> String {
+        let mut term = Terminal::new(TestBackend::new(170, 60)).expect("terminal");
+        term.draw(|f| crate::tabs::draw(f, f.area(), app))
+            .expect("draw");
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn smart_tab_says_root_is_why_it_is_empty() {
+        let out = render(&refused_app(TabId::Smart));
+        assert!(
+            out.contains("smartctl could not open /dev/nvme0n1: permission denied"),
+            "{out}"
+        );
+        assert!(out.contains("sudo diskwatch"), "{out}");
+        assert!(out.contains("nvme1n1 needs root"), "picker badge\n{out}");
+    }
+
+    #[test]
+    fn overview_and_devices_say_needs_root_instead_of_a_dash() {
+        let out = render(&refused_app(TabId::Overview));
+        let row = out.lines().find(|l| l.contains("nvme1n1")).unwrap();
+        assert!(row.contains("needs root"), "{row:?}");
+
+        let out = render(&refused_app(TabId::Devices));
+        assert!(out.contains("SMART needs root"), "{out}");
+        let detail = out.lines().find(|l| l.contains("SMART    ")).unwrap();
+        assert!(detail.contains("needs root"), "{detail:?}");
+    }
 }

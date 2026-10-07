@@ -331,6 +331,7 @@ fn draw_devices_summary(f: &mut Frame, area: Rect, app: &App) {
         let (smart_text, smart_col) = match d.smart_ok {
             Some(true) => ("ok", p::green()),
             Some(false) => ("FAIL", p::red()),
+            None if app.smart.needs_root(&d.name) => ("needs root", p::dim()),
             None => ("—", p::dim()),
         };
         let dot_col = match d.smart_ok {

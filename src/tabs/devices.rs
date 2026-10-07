@@ -139,13 +139,22 @@ fn draw_device_table(f: &mut Frame, area: Rect, app: &App) {
             inner.width.saturating_sub(2),
             d,
             selected,
+            app.smart.needs_root(&d.name),
         );
         y += 2;
         let _ = rows_avail;
     }
 }
 
-fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, selected: bool) {
+fn draw_device_row(
+    f: &mut Frame,
+    x: u16,
+    y: u16,
+    w: u16,
+    d: &DeviceTick,
+    selected: bool,
+    smart_needs_root: bool,
+) {
     let dot_color = if d.idle {
         p::dim()
     } else {
@@ -212,6 +221,7 @@ fn draw_device_row(f: &mut Frame, x: u16, y: u16, w: u16, d: &DeviceTick, select
         match d.smart_ok {
             Some(true) => ("smart verified".to_string(), p::green()),
             Some(false) => ("SMART FAILING".to_string(), p::red()),
+            None if smart_needs_root => ("SMART needs root".to_string(), p::dim()),
             None => (
                 if d.is_removable {
                     "removable".to_string()
@@ -273,9 +283,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             0
         };
         let used_color = usage_color(used_pct);
+        let needs_root = app.smart.needs_root(&d.name);
         let (smart_text, smart_color) = match d.smart_ok {
             Some(true) => ("verified".to_string(), p::green()),
             Some(false) => ("FAILING".to_string(), p::red()),
+            None if needs_root => ("needs root".to_string(), p::dim()),
             None => ("—".to_string(), p::dim()),
         };
         let mut rows = vec![
@@ -320,7 +332,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         ];
         rows.push(Line::from(""));
         rows.push(Line::from(Span::styled(
-            " temp / wear / power-on hours pending smartctl",
+            if needs_root {
+                " temp / wear / power-on hours need root: sudo diskwatch"
+            } else {
+                " temp / wear / power-on hours pending smartctl"
+            },
             Style::default().fg(p::dim()),
         )));
         f.render_widget(

@@ -29,6 +29,9 @@ pub struct SmartTick {
     pub data_units_written: Option<u64>,
     /// Free-form attributes for ATA drives — name → (raw, value).
     pub ata_attrs: Vec<AtaAttr>,
+    /// smartctl was refused the device for lack of privilege, so every
+    /// field above is empty because of permissions, not the drive.
+    pub needs_root: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,6 +71,17 @@ impl SmartCollector {
 
     pub fn smartctl_available(&self) -> bool {
         matches!(self.have_smartctl, Some(true))
+    }
+
+    /// True when the last poll of `device` was refused for lack of root.
+    pub fn needs_root(&self, device: &str) -> bool {
+        self.by_device.get(device).is_some_and(|t| t.needs_root)
+    }
+
+    /// Render tests run where smartctl may not be installed.
+    #[cfg(test)]
+    pub fn assume_smartctl(&mut self) {
+        self.have_smartctl = Some(true);
     }
 
     pub fn current_interval(&self) -> Duration {
@@ -149,9 +163,29 @@ fn query_device(name: &str) -> Option<SmartTick> {
     // smartctl returns nonzero exit on warning-class issues but still
     // emits valid JSON; parse the output regardless of status.
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(parse_smartctl(name, &v))
+}
 
+/// True when smartctl was refused the device for lack of privilege. As a
+/// normal user it exits 2 with no data and says why in `smartctl.messages`:
+/// "Smartctl open device: /dev/nvme0n1 failed: Permission denied" when the
+/// node is root-only, or EPERM from the admin passthrough when it isn't.
+fn refused(v: &serde_json::Value) -> bool {
+    let Some(messages) = v.pointer("/smartctl/messages").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    messages.iter().any(|m| {
+        m.get("string").and_then(|s| s.as_str()).is_some_and(|s| {
+            s.contains("Permission denied") || s.contains("Operation not permitted")
+        })
+    })
+}
+
+/// Pull the headline fields out of `smartctl -A --json` output.
+fn parse_smartctl(name: &str, v: &serde_json::Value) -> SmartTick {
     let mut tick = SmartTick {
         device: name.to_string(),
+        needs_root: refused(v),
         ..Default::default()
     };
 
@@ -259,5 +293,96 @@ fn query_device(name: &str) -> Option<SmartTick> {
             }
         }
     }
-    Some(tick)
+    tick
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `smartctl -A --json /dev/nvme0n1` as a normal user, verbatim from
+    /// smartctl 7.5 on Fedora 44.
+    const REFUSED: &str = r#"{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      5
+    ],
+    "pre_release": false,
+    "svn_revision": "5714",
+    "platform_info": "x86_64-linux-7.1.13-200.fc44.x86_64",
+    "build_info": "(local build)",
+    "argv": [
+      "smartctl",
+      "-A",
+      "--json",
+      "/dev/nvme0n1"
+    ],
+    "messages": [
+      {
+        "string": "Smartctl open device: /dev/nvme0n1 failed: Permission denied",
+        "severity": "error"
+      }
+    ],
+    "exit_status": 2
+  },
+  "local_time": {
+    "time_t": 1791358805,
+    "asctime": "Wed Oct  7 18:40:05 2026 AEDT"
+  }
+}"#;
+
+    /// The same query as root, trimmed to the fields diskwatch reads.
+    const NVME: &str = r#"{
+  "smartctl": { "version": [7, 4], "exit_status": 0 },
+  "device": { "name": "/dev/nvme0n1", "type": "nvme", "protocol": "NVMe" },
+  "nvme_smart_health_information_log": {
+    "critical_warning": 0,
+    "temperature": 41,
+    "available_spare": 100,
+    "percentage_used": 2,
+    "data_units_read": 19446553,
+    "data_units_written": 25771349,
+    "power_cycles": 412,
+    "power_on_hours": 3150
+  },
+  "temperature": { "current": 41 },
+  "power_cycle_count": 412,
+  "power_on_time": { "hours": 3150 }
+}"#;
+
+    fn parse(text: &str) -> SmartTick {
+        parse_smartctl("nvme0n1", &serde_json::from_str(text).unwrap())
+    }
+
+    #[test]
+    fn a_permission_refusal_is_told_apart_from_no_data() {
+        // Issue #25: without sudo every SMART field read "—" with nothing
+        // to say that root was the reason.
+        let t = parse(REFUSED);
+        assert!(t.needs_root);
+        assert_eq!(t.temperature_c, None);
+        assert_eq!(t.power_on_hours, None);
+    }
+
+    #[test]
+    fn a_successful_read_does_not_need_root() {
+        let t = parse(NVME);
+        assert!(!t.needs_root);
+        assert_eq!(t.temperature_c, Some(41));
+        assert_eq!(t.percentage_used, Some(2));
+        assert_eq!(t.power_on_hours, Some(3150));
+    }
+
+    #[test]
+    fn other_failures_are_not_blamed_on_root() {
+        let t = parse(
+            r#"{"smartctl": {"messages": [{"string": "/dev/zram0: Unable to detect device type", "severity": "error"}], "exit_status": 1}}"#,
+        );
+        assert!(!t.needs_root);
+    }
 }
