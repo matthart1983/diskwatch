@@ -237,7 +237,8 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Pools that couldn't be read are still worth a line when other
-    // volumes are listed: their absence would otherwise look like none.
+    // volumes are listed: their absence would otherwise look like none,
+    // and pools kept from an earlier listing would look current.
     if let Some(note) = &app.volumes.zfs_note {
         if y + 1 < max_y {
             f.render_widget(
@@ -781,6 +782,16 @@ mod tests {
             zfs_note: Some(note.to_string()),
             ..Default::default()
         });
+        assert!(out.contains(note), "{out}");
+
+        // Pools kept from the last listing are marked as such.
+        let note = "zpool list did not answer within 2s; showing pools as last listed";
+        let out = render(VolumeTick {
+            zfs: fixtures::pools(fixtures::UBUNTU),
+            zfs_note: Some(note.to_string()),
+            ..Default::default()
+        });
+        assert!(out.contains("\u{25be} rpool"), "{out}");
         assert!(out.contains(note), "{out}");
     }
 }

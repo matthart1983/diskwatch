@@ -64,9 +64,10 @@ root. Each disk gets what it physically holds of its pool's `ALLOC`. Every membe
 mirror holds the whole vdev, raidz and dRAID members hold an even share, and cache and
 spare devices hold nothing. A pool mirrored over two disks shows its allocation on both,
 because both hold it, so the Overview's capacity totals are raw bytes on disk rather than
-usable space. A pool counts once however many of its datasets are mounted. If `zpool` is
-missing, fails or takes more than 2s to answer, diskwatch leaves the pools out and the
-Volumes tab says why.
+usable space. A pool counts once however many of its datasets are mounted. If `zpool`
+fails or takes more than 2s to answer, diskwatch keeps the pools from the last listing that
+worked and the Volumes tab says they're out of date. If it has never answered, or isn't
+installed, the pools are left out and the tab says why.
 
 ## Lite
 

@@ -286,13 +286,13 @@ pub(crate) fn parse_zpool_list(text: &str) -> Vec<ZfsPool> {
     pools
 }
 
-/// Imported pools, plus why there are none when ZFS is in use but `zpool`
-/// couldn't say.
+/// Imported pools, plus a word when `zpool` couldn't list them: why they're
+/// missing, or that they're from the last listing that worked.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Default)]
 pub struct ZfsProbe {
     pub pools: Vec<ZfsPool>,
-    /// One line for the Volumes tab. `None` when pools were read, or when
+    /// One line for the Volumes tab. `None` when zpool answered, or when
     /// ZFS isn't loaded at all. A machine without ZFS hears nothing.
     pub note: Option<String>,
 }
@@ -302,7 +302,8 @@ pub struct ZfsProbe {
 /// Called once a second from the usage refresh, so the result is cached
 /// for `FRESH`. After a timeout the next try waits `RETRY_AFTER_TIMEOUT`
 /// instead: a suspended pool can hang zpool, and a stuck process every few
-/// seconds would pile up.
+/// seconds would pile up. A failed or timed-out run keeps the pools from
+/// the last run that worked; see `settle`.
 #[cfg(target_os = "linux")]
 pub fn probe() -> ZfsProbe {
     use std::sync::Mutex;
@@ -328,7 +329,13 @@ pub fn probe() -> ZfsProbe {
             return c.probe.clone();
         }
     }
-    let (probe, timed_out) = run_probe();
+    let outcome = run_zpool();
+    let timed_out = matches!(outcome, Run::TimedOut);
+    // The previous probe's pools are the last ones zpool listed: a failed
+    // run carries them over, so they outlast any number of failures.
+    let last = cache.take().map(|c| c.probe.pools).unwrap_or_default();
+    let zfs_loaded = std::path::Path::new("/sys/module/zfs").exists();
+    let probe = settle(outcome, last, zfs_loaded);
     *cache = Some(Cached {
         at: Instant::now(),
         timed_out,
@@ -341,9 +348,8 @@ pub fn probe() -> ZfsProbe {
 #[cfg(target_os = "linux")]
 const ZPOOL_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Returns the probe and whether zpool timed out.
 #[cfg(target_os = "linux")]
-fn run_probe() -> (ZfsProbe, bool) {
+fn run_zpool() -> Run {
     // zpool lives in sbin, which isn't on a normal user's PATH on Debian.
     const ZPOOL: [&str; 3] = ["zpool", "/usr/sbin/zpool", "/sbin/zpool"];
     const ARGS: [&str; 6] = [
@@ -362,16 +368,29 @@ fn run_probe() -> (ZfsProbe, bool) {
             break;
         }
     }
+    outcome
+}
+
+/// Turn a run of zpool into the probe the rest of diskwatch sees. `last`
+/// is the pools the previous probe reported.
+///
+/// A run that fails or times out keeps `last`, with a note saying they're
+/// from the last listing that worked. zpool can stall past its 2s on a
+/// busy pool, and that's no reason to drop the pools: every ZFS disk would
+/// read 0% used again (issue #25) and the Volumes tab would lose them until
+/// the next try. Only when zpool has never listed anything are there no
+/// pools to show.
+#[cfg(target_os = "linux")]
+fn settle(outcome: Run, last: Vec<ZfsPool>, zfs_loaded: bool) -> ZfsProbe {
     let text = match outcome {
         Run::Ok(text) => text,
         failed => {
+            let kept = !last.is_empty();
             // Only worth a word if ZFS is actually in use here.
-            let zfs_loaded = std::path::Path::new("/sys/module/zfs").exists();
-            let probe = ZfsProbe {
-                pools: Vec::new(),
-                note: zfs_loaded.then(|| failure_note(&failed)),
+            return ZfsProbe {
+                note: (kept || zfs_loaded).then(|| failure_note(&failed, kept)),
+                pools: last,
             };
-            return (probe, matches!(failed, Run::TimedOut));
         }
     };
 
@@ -383,7 +402,7 @@ fn run_probe() -> (ZfsProbe, bool) {
     {
         m.dev = kernel_name(&m.path);
     }
-    (ZfsProbe { pools, note: None }, false)
+    ZfsProbe { pools, note: None }
 }
 
 /// `/dev/disk/by-id/nvme-…-part3` → `nvme0n1p3`, `/dev/mapper/crypt` →
@@ -407,18 +426,25 @@ enum Run {
     Failed(Option<i32>),
 }
 
+/// `kept` says the pools on screen are from an earlier listing.
 #[cfg(target_os = "linux")]
-fn failure_note(run: &Run) -> String {
-    match run {
-        Run::Ok(_) => String::new(),
-        Run::Missing => "ZFS is loaded but zpool was not found; pools not shown".to_string(),
+fn failure_note(run: &Run, kept: bool) -> String {
+    let why = match run {
+        Run::Ok(_) => return String::new(),
+        Run::Missing => "ZFS is loaded but zpool was not found".to_string(),
         Run::TimedOut => format!(
-            "zpool list did not answer within {}s; pools not shown",
+            "zpool list did not answer within {}s",
             ZPOOL_TIMEOUT.as_secs()
         ),
-        Run::Failed(Some(code)) => format!("zpool list failed (exit {code}); pools not shown"),
-        Run::Failed(None) => "zpool list failed; pools not shown".to_string(),
-    }
+        Run::Failed(Some(code)) => format!("zpool list failed (exit {code})"),
+        Run::Failed(None) => "zpool list failed".to_string(),
+    };
+    let shown = if kept {
+        "showing pools as last listed"
+    } else {
+        "pools not shown"
+    };
+    format!("{why}; {shown}")
 }
 
 /// Run a command for its stdout, giving up after `timeout`.
@@ -889,12 +915,50 @@ tank         1000    400    600    ONLINE
             Run::Missing
         ));
         if !std::path::Path::new("/sys/module/zfs").exists() {
-            let (probe, timed_out) = run_probe();
+            let outcome = run_zpool();
+            assert!(!matches!(outcome, Run::TimedOut));
+            let probe = settle(outcome, Vec::new(), false);
             if probe.pools.is_empty() {
                 assert!(probe.note.is_none(), "{:?}", probe.note);
             }
-            assert!(!timed_out);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_run_keeps_the_last_pools() {
+        // One slow zpool must not put issue #25's disks back at 0% used:
+        // the pools it listed last time stand, and the tab says so.
+        let last = pools(UBUNTU);
+        for (failed, why) in [
+            (Run::TimedOut, "zpool list did not answer within 2s"),
+            (Run::Failed(Some(1)), "zpool list failed (exit 1)"),
+        ] {
+            let probe = settle(failed, last.clone(), true);
+            let names: Vec<&str> = probe.pools.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["bpool", "rpool"]);
+            assert_eq!(probe.pools[1].vdevs[0].members[0].display(), "nvme0n1p3");
+            assert_eq!(
+                probe.note.as_deref(),
+                Some(format!("{why}; showing pools as last listed").as_str())
+            );
+        }
+
+        // Never listed: nothing to keep.
+        let probe = settle(Run::TimedOut, Vec::new(), true);
+        assert!(probe.pools.is_empty());
+        assert_eq!(
+            probe.note.as_deref(),
+            Some("zpool list did not answer within 2s; pools not shown")
+        );
+
+        // The next run that works replaces them, down to no pools at all.
+        let probe = settle(Run::Ok(MIRROR.to_string()), last.clone(), true);
+        assert_eq!(probe.pools[0].name, "backup");
+        assert_eq!(probe.note, None);
+        let probe = settle(Run::Ok("no pools available\n".to_string()), last, true);
+        assert!(probe.pools.is_empty());
+        assert_eq!(probe.note, None);
     }
 
     #[cfg(target_os = "linux")]

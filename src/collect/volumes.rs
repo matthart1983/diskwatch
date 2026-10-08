@@ -12,7 +12,7 @@ pub struct VolumeTick {
     pub containers: Vec<ApfsContainer>,
     pub mdraid: Vec<MdRaidArray>,
     pub zfs: Vec<ZfsPool>,
-    /// Why ZFS pools are missing when ZFS is loaded but `zpool` couldn't
+    /// Why ZFS pools are missing, or out of date, when `zpool` couldn't
     /// list them. One line in the tab.
     pub zfs_note: Option<String>,
 }
