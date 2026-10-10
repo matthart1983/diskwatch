@@ -687,7 +687,9 @@ mod tests {
     /// A root with one unreadable directory inside it must still be
     /// watched — and report what it skipped — rather than being dropped
     /// whole. Root can read everything, so skip when running as root.
-    #[cfg(unix)]
+    /// Linux only: FSEvents watches an unreadable subtree without error,
+    /// so there is no failure to recover from on macOS.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_unreadable_subdirectory_does_not_lose_the_root() {
         use std::os::unix::fs::PermissionsExt;
