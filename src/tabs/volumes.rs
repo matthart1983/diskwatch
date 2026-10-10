@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::collect::hot_files::PoolHot;
 use crate::collect::volumes::{ApfsContainer, ApfsVolume, VolumeTick};
 use crate::collect::zfs::{VdevClass, ZfsPool, ZfsVdev};
 use crate::ui::format::{fmt_size, pad_left, pad_right, usage_color};
@@ -219,6 +220,7 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    let hot = app.hot_files.pool_activity(&app.filesystems);
     for pool in &app.volumes.zfs {
         if y >= max_y {
             break;
@@ -233,6 +235,23 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
             let last = i + 1 == n;
             draw_zfs_vdev_row(f, inner.x + 1, y, inner.width.saturating_sub(2), vdev, last);
             y += 1;
+        }
+        if let Some(h) = hot.get(&pool.name) {
+            for line in zfs_hot_lines(h) {
+                if y >= max_y {
+                    break;
+                }
+                f.render_widget(
+                    Paragraph::new(line).style(Style::default().bg(p::bg())),
+                    Rect {
+                        x: inner.x + 1,
+                        y,
+                        width: inner.width.saturating_sub(2),
+                        height: 1,
+                    },
+                );
+                y += 1;
+            }
         }
     }
 
@@ -315,6 +334,46 @@ fn draw_zfs_pool_row(f: &mut Frame, x: u16, y: u16, w: u16, pool: &ZfsPool) {
             height: 1,
         },
     );
+}
+
+/// The "hot files" rows under a pool: a summary line, then its busiest
+/// files. A pool nothing watches says so rather than reading as idle.
+fn zfs_hot_lines(h: &PoolHot) -> Vec<Line<'static>> {
+    let label = |text: String, color| {
+        vec![
+            Span::raw("   "),
+            Span::styled(pad_right("hot files", 10), Style::default().fg(p::dim())),
+            Span::styled(text, Style::default().fg(color)),
+        ]
+    };
+    if !h.watched {
+        return vec![Line::from(label(
+            "not watched \u{2014} pass --watch <mountpoint>".to_string(),
+            p::dim(),
+        ))];
+    }
+    if h.top.is_empty() {
+        return vec![Line::from(label("idle".to_string(), p::dim()))];
+    }
+    let mut lines = vec![Line::from(label(
+        format!("{:.1} ev/s", h.events_per_sec),
+        p::fg(),
+    ))];
+    let n = h.top.len();
+    for (i, (path, rate)) in h.top.iter().enumerate() {
+        let branch = if i + 1 == n { "\u{2514}" } else { "\u{251c}" };
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(format!("{branch} "), Style::default().fg(p::dim())),
+            Span::styled(
+                pad_left(&format!("{rate:.1} ev/s"), 12),
+                Style::default().fg(p::fg()),
+            ),
+            Span::raw("  "),
+            Span::styled(path.display().to_string(), Style::default().fg(p::dim())),
+        ]));
+    }
+    lines
 }
 
 /// `mirror · nvme0n1p3, nvme1n1p3`, with any member that isn't ONLINE
@@ -793,5 +852,47 @@ mod tests {
         });
         assert!(out.contains("\u{25be} rpool"), "{out}");
         assert!(out.contains(note), "{out}");
+    }
+
+    fn text(lines: Vec<Line<'static>>) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_pool_lists_its_busiest_files() {
+        let h = PoolHot {
+            events_per_sec: 50.0,
+            top: vec![
+                (std::path::PathBuf::from("/tank/db.sqlite"), 40.0),
+                (std::path::PathBuf::from("/tank/log"), 10.0),
+            ],
+            watched: true,
+        };
+        let out = text(zfs_hot_lines(&h));
+        assert!(out.contains("50.0 ev/s"), "{out}");
+        assert!(
+            out.contains("40.0 ev/s") && out.contains("/tank/db.sqlite"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_unwatched_pool_says_so_instead_of_idle() {
+        let h = PoolHot::default();
+        assert!(text(zfs_hot_lines(&h)).contains("not watched"));
+        let h = PoolHot {
+            watched: true,
+            ..PoolHot::default()
+        };
+        assert!(text(zfs_hot_lines(&h)).contains("idle"));
     }
 }

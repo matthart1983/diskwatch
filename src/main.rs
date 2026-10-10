@@ -270,7 +270,16 @@ fn main() -> Result<()> {
         mounts: cfg.ignore_mounts.clone(),
     });
     let r = resolve(&cli, &cfg, env_watch_paths());
-    let watch_roots = collect::hot_files::resolve_roots(r.watch_replace.clone(), &r.watch_extra);
+    // Datasets mounted outside $HOME (/tank, /mnt/pool) are otherwise
+    // invisible to Hot Files and to the pool view that reads from it. An
+    // explicit --watch means "only these", so leave it alone.
+    let mut watch_extra = r.watch_extra.clone();
+    if r.watch_replace.is_none() {
+        watch_extra.extend(collect::hot_files::zfs_mount_roots(
+            &collect::filesystems::collect(),
+        ));
+    }
+    let watch_roots = collect::hot_files::resolve_roots(r.watch_replace.clone(), &watch_extra);
 
     if cli.diag {
         return run_diag(&cfg, &watch_roots);

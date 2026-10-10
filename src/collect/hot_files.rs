@@ -274,6 +274,18 @@ impl HotFileWatcher {
         v
     }
 
+    /// Hot-file activity per ZFS pool. `fs` is the current mount table.
+    pub fn pool_activity(&self, fs: &[crate::collect::FsTick]) -> HashMap<String, PoolHot> {
+        let s = self.state.lock().unwrap();
+        let active: Vec<(PathBuf, f64)> = s
+            .activity
+            .values()
+            .filter(|a| a.events_per_sec > 0.0)
+            .map(|a| (a.path.clone(), a.events_per_sec))
+            .collect();
+        attribute_to_pools(&active, fs, &s.watch_roots)
+    }
+
     pub fn snapshot_meta(&self) -> (u64, Vec<PathBuf>, Option<String>) {
         let s = self.state.lock().unwrap();
         (s.total_events, s.watch_roots.clone(), s.error.clone())
@@ -285,6 +297,96 @@ impl HotFileWatcher {
     pub fn active_count(&self) -> usize {
         self.state.lock().unwrap().activity.len()
     }
+}
+
+/// Hot-file activity attributed to one ZFS pool.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PoolHot {
+    /// Summed event rate of the pool's active files.
+    pub events_per_sec: f64,
+    /// Busiest files first, at most [`POOL_HOT_TOP`].
+    pub top: Vec<(PathBuf, f64)>,
+    /// Some mountpoint of the pool lies under a watched root. When false
+    /// the pool shows no activity because nothing is looking, not because
+    /// it is idle.
+    pub watched: bool,
+}
+
+/// Files listed per pool.
+pub const POOL_HOT_TOP: usize = 3;
+
+/// Mountpoints of ZFS datasets worth watching by default. `/` is left out:
+/// a root-on-ZFS install would otherwise watch the whole system, and
+/// `$HOME` beneath it is already a default root.
+pub fn zfs_mount_roots(fs: &[crate::collect::FsTick]) -> Vec<PathBuf> {
+    fs.iter()
+        .filter(|f| f.fs_type == "zfs" && f.mount != "/")
+        .map(|f| PathBuf::from(&f.mount))
+        .collect()
+}
+
+/// Pool a dataset belongs to: `tank/data/db` → `tank`.
+fn pool_of(dataset: &str) -> &str {
+    dataset.split('/').next().unwrap_or(dataset)
+}
+
+/// Attribute hot paths to ZFS pools by the deepest mount each lies under,
+/// so a non-ZFS mount nested inside a dataset (or the reverse) is credited
+/// to the right filesystem.
+///
+/// A path that is the parent of another active path is skipped: a write to
+/// `/tank/db/x` also raises an event on `/tank/db`, and counting both
+/// would double the pool's rate.
+pub fn attribute_to_pools(
+    activity: &[(PathBuf, f64)],
+    fs: &[crate::collect::FsTick],
+    roots: &[PathBuf],
+) -> HashMap<String, PoolHot> {
+    let mut out: HashMap<String, PoolHot> = HashMap::new();
+    // Every pool with a mount gets an entry, so "idle" is distinguishable
+    // from "unknown".
+    for f in fs.iter().filter(|f| f.fs_type == "zfs") {
+        let mount = Path::new(&f.mount);
+        let covered = roots
+            .iter()
+            .any(|r| mount.starts_with(r) || r.starts_with(mount));
+        let e = out.entry(pool_of(&f.device).to_string()).or_default();
+        e.watched |= covered;
+    }
+    if out.is_empty() {
+        return out;
+    }
+
+    let mut parents: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+    for (path, _) in activity {
+        for a in path.ancestors().skip(1) {
+            if !parents.insert(a) {
+                break; // everything above is already recorded
+            }
+        }
+    }
+
+    for (path, rate) in activity {
+        if parents.contains(path.as_path()) {
+            continue;
+        }
+        let owner = fs
+            .iter()
+            .filter(|f| path.starts_with(&f.mount))
+            .max_by_key(|f| Path::new(&f.mount).components().count());
+        let Some(owner) = owner.filter(|f| f.fs_type == "zfs") else {
+            continue;
+        };
+        let e = out.entry(pool_of(&owner.device).to_string()).or_default();
+        e.events_per_sec += rate;
+        e.top.push((path.clone(), *rate));
+    }
+    for e in out.values_mut() {
+        e.top
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        e.top.truncate(POOL_HOT_TOP);
+    }
+    out
 }
 
 /// Sensible default roots that show real user activity without drowning
@@ -607,5 +709,88 @@ mod tests {
         let err = err.expect("the skipped directory should be reported");
         assert!(err.contains("locked"), "{err}");
         assert!(!err.contains("fails the whole root"), "{err}");
+    }
+
+    fn mount(dev: &str, at: &str, ty: &str) -> crate::collect::FsTick {
+        crate::collect::FsTick {
+            mount: at.into(),
+            device: dev.into(),
+            fs_type: ty.into(),
+            size_bytes: 0,
+            used_bytes: 0,
+            avail_bytes: 0,
+            inode_pct: None,
+            is_removable: false,
+            is_system: false,
+            ro_image: false,
+            ignored: false,
+        }
+    }
+
+    fn act(items: &[(&str, f64)]) -> Vec<(PathBuf, f64)> {
+        items.iter().map(|(p, r)| (PathBuf::from(p), *r)).collect()
+    }
+
+    #[test]
+    fn activity_lands_on_the_pool_that_owns_the_mount() {
+        let fs = vec![
+            mount("/dev/nvme0n1p2", "/", "ext4"),
+            mount("tank/data", "/tank/data", "zfs"),
+            mount("bpool/boot", "/boot", "zfs"),
+        ];
+        let roots = vec![PathBuf::from("/tank/data"), PathBuf::from("/boot")];
+        let a = act(&[
+            ("/tank/data/db.sqlite", 40.0),
+            ("/tank/data/log", 10.0),
+            ("/boot/grub/grubenv", 2.0),
+            ("/home/x/file", 99.0), // ext4: not a pool
+        ]);
+        let out = attribute_to_pools(&a, &fs, &roots);
+        assert_eq!(out["tank"].events_per_sec, 50.0);
+        assert_eq!(out["tank"].top[0].0, PathBuf::from("/tank/data/db.sqlite"));
+        assert_eq!(out["bpool"].events_per_sec, 2.0);
+        assert!(out["tank"].watched);
+    }
+
+    #[test]
+    fn a_parent_directory_event_is_not_counted_twice() {
+        let fs = vec![mount("tank/data", "/tank/data", "zfs")];
+        let roots = vec![PathBuf::from("/tank/data")];
+        let a = act(&[("/tank/data/db", 30.0), ("/tank/data/db/x", 30.0)]);
+        let out = attribute_to_pools(&a, &fs, &roots);
+        assert_eq!(out["tank"].events_per_sec, 30.0);
+        assert_eq!(out["tank"].top.len(), 1);
+    }
+
+    #[test]
+    fn the_deepest_mount_wins_over_an_enclosing_dataset() {
+        let fs = vec![
+            mount("tank/data", "/tank/data", "zfs"),
+            mount("/dev/sdb1", "/tank/data/usb", "ext4"),
+        ];
+        let roots = vec![PathBuf::from("/tank/data")];
+        let a = act(&[("/tank/data/usb/f", 5.0), ("/tank/data/g", 1.0)]);
+        let out = attribute_to_pools(&a, &fs, &roots);
+        assert_eq!(out["tank"].events_per_sec, 1.0);
+    }
+
+    #[test]
+    fn an_unwatched_pool_is_distinguished_from_an_idle_one() {
+        let fs = vec![mount("tank/data", "/tank/data", "zfs")];
+        let out = attribute_to_pools(&[], &fs, &[PathBuf::from("/home/x")]);
+        assert!(!out["tank"].watched);
+        let out = attribute_to_pools(&[], &fs, &[PathBuf::from("/tank")]);
+        assert!(out["tank"].watched);
+        assert_eq!(out["tank"].events_per_sec, 0.0);
+    }
+
+    #[test]
+    fn zfs_mounts_become_default_roots_except_slash() {
+        let fs = vec![
+            mount("rpool/ROOT", "/", "zfs"),
+            mount("tank/data", "/tank/data", "zfs"),
+            mount("/dev/sda1", "/mnt", "ext4"),
+        ];
+        assert_eq!(zfs_mount_roots(&fs), vec![PathBuf::from("/tank/data")]);
     }
 }
