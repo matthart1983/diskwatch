@@ -180,6 +180,23 @@ impl HotFileWatcher {
             }
             match watcher.watch(r, RecursiveMode::Recursive) {
                 Ok(()) => watched.push(r.to_path_buf()),
+                // `notify` abandons a whole recursive root at the first
+                // directory it can't open (rootless-container storage under
+                // $HOME is enough), leaving a random partial watch behind.
+                // Walk it ourselves and skip what we can't read instead.
+                Err(e) if is_unreadable_descendant(r, &e) => {
+                    let skipped = watch_readable_tree(&mut watcher, r);
+                    watched.push(r.to_path_buf());
+                    if let Some(first) = skipped.first() {
+                        errors.push(format!(
+                            "{}: {} unreadable director{} not watched (e.g. {})",
+                            r.display(),
+                            skipped.len(),
+                            if skipped.len() == 1 { "y" } else { "ies" },
+                            first.display()
+                        ));
+                    }
+                }
                 Err(e) => errors.push(describe_watch_error(r, &e)),
             }
         }
@@ -304,6 +321,54 @@ pub fn default_roots() -> Vec<PathBuf> {
         roots.push(PathBuf::from("/tmp"));
     }
     prune_nested_roots(roots)
+}
+
+/// True when a recursive watch of `root` failed because a directory
+/// *underneath* it couldn't be read — the case [`watch_readable_tree`]
+/// can recover from. Out-of-watches and a bad root itself can't be.
+fn is_unreadable_descendant(root: &Path, e: &notify::Error) -> bool {
+    matches!(&e.kind, notify::ErrorKind::Io(io)
+        if io.kind() == std::io::ErrorKind::PermissionDenied)
+        && e.paths.first().is_some_and(|p| p != root)
+}
+
+/// Watch `root` and every readable directory under it, one non-recursive
+/// watch each, never following symlinks. Returns the directories that
+/// couldn't be read or watched; they and their subtrees are left out.
+///
+/// Unlike a recursive watch this does not pick up directories created
+/// after startup, which is the price of not losing the whole root to one
+/// unreadable directory.
+fn watch_readable_tree(watcher: &mut impl Watcher, root: &Path) -> Vec<PathBuf> {
+    let mut skipped = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => {
+                skipped.push(dir);
+                continue;
+            }
+        };
+        match watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            Ok(()) => {}
+            Err(e) if matches!(e.kind, notify::ErrorKind::MaxFilesWatch) => {
+                // Out of descriptors: nothing further down can succeed.
+                skipped.push(dir);
+                break;
+            }
+            Err(_) => {
+                skipped.push(dir);
+                continue;
+            }
+        }
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(entry.path());
+            }
+        }
+    }
+    skipped
 }
 
 /// Turn a `notify` failure into something a user can act on.
@@ -515,5 +580,32 @@ mod tests {
             err.contains("diskwatch-does-not-exist-49bd2f"),
             "the error should name the offending path, got: {err}"
         );
+    }
+
+    /// A root with one unreadable directory inside it must still be
+    /// watched — and report what it skipped — rather than being dropped
+    /// whole. Root can read everything, so skip when running as root.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subdirectory_does_not_lose_the_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("diskwatch-unreadable-{}", std::process::id()));
+        let good = dir.join("good");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&good).expect("good dir");
+        std::fs::create_dir_all(locked.join("inner")).expect("locked dir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&locked).is_ok();
+        let w = HotFileWatcher::start(&[dir.as_path()]);
+        let (_, roots, err) = w.snapshot_meta();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        if readable {
+            return; // running as root
+        }
+        assert_eq!(roots, vec![dir.clone()], "the root is still watched");
+        let err = err.expect("the skipped directory should be reported");
+        assert!(err.contains("locked"), "{err}");
+        assert!(!err.contains("fails the whole root"), "{err}");
     }
 }

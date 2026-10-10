@@ -482,7 +482,7 @@ fn draw_bottom_strip(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
     draw_insights_summary(f, split[0], app);
-    draw_hot_files_note(f, split[1]);
+    draw_hot_files(f, split[1], app);
 }
 
 fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
@@ -540,32 +540,80 @@ fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_hot_files_note(f: &mut Frame, area: Rect) {
+fn draw_hot_files(f: &mut Frame, area: Rect, app: &App) {
+    let (_, roots, err) = app.hot_files.snapshot_meta();
+    let title = " HOT FILES ".to_string();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
-            " HOT FILES ",
-            Style::default().fg(p::dim()).add_modifier(Modifier::BOLD),
+            title,
+            Style::default()
+                .fg(p::yellow())
+                .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(p::bg()));
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if inner.height == 0 || inner.width < 20 {
+        return;
+    }
+
+    let top = app.hot_files.top(inner.height as usize);
+    let top: Vec<_> = top.into_iter().filter(|a| a.events_per_sec > 0.0).collect();
+    let dim = Style::default().fg(p::dim());
+    let lines: Vec<Line> = if top.is_empty() {
+        // Say why it's empty: nothing watched and nothing happening read
+        // the same on screen but need different fixes.
+        let why = match (&err, roots.is_empty()) {
+            (Some(e), true) => format!("  not watching: {e}"),
+            (_, true) => "  no watch roots".to_string(),
+            _ => "  no file activity yet".to_string(),
+        };
+        vec![Line::from(""), Line::from(Span::styled(why, dim))]
+    } else {
+        // 2 margin + rate(9) + 2 gap + age(4) + 2 gap
+        let path_w = (inner.width as usize).saturating_sub(19);
+        let now = std::time::Instant::now();
+        top.iter()
+            .map(|a| {
+                let age = now.duration_since(a.last_seen).as_secs();
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        pad_left(&format!("{:.1}/s", a.events_per_sec), 9),
+                        Style::default().fg(p::fg()),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(pad_left(&overview_age(age), 4), dim),
+                    Span::raw("  "),
+                    Span::styled(left_truncate(&a.path.to_string_lossy(), path_w), dim),
+                ])
+            })
+            .collect()
+    };
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "  per-process write rate deferred",
-                Style::default().fg(p::dim()),
-            )),
-            Line::from(Span::styled(
-                "  see [7] for what's needed",
-                Style::default().fg(p::dim()),
-            )),
-        ])
-        .style(Style::default().bg(p::bg())),
+        Paragraph::new(lines).style(Style::default().bg(p::bg())),
         inner,
     );
+}
+
+fn overview_age(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3600),
+    }
+}
+
+/// Keep the tail of a path — the filename is the part that matters.
+fn left_truncate(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w || w < 2 {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - (w - 1)).collect();
+    format!("\u{2026}{tail}")
 }
 
 // ---------- bottom capacity bar ----------
@@ -666,5 +714,28 @@ fn draw_capacity_bar(f: &mut Frame, area: Rect, app: &App) {
                 height: 1,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod hot_panel_tests {
+    use super::*;
+
+    #[test]
+    fn long_paths_keep_their_tail() {
+        assert_eq!(left_truncate("/a/b/c.txt", 20), "/a/b/c.txt");
+        let t = left_truncate("/very/long/dir/file.sqlite-wal", 12);
+        assert_eq!(t.chars().count(), 12);
+        assert!(
+            t.starts_with('\u{2026}') && t.ends_with(".sqlite-wal"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn ages_scale_to_the_largest_unit() {
+        assert_eq!(overview_age(5), "5s");
+        assert_eq!(overview_age(120), "2m");
+        assert_eq!(overview_age(7200), "2h");
     }
 }
