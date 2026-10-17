@@ -157,12 +157,28 @@ impl HotFileState {
 pub struct HotFileWatcher {
     pub state: Arc<Mutex<HotFileState>>,
     _watcher: Arc<Mutex<Option<notify::RecommendedWatcher>>>,
+    /// Cancellation request, read outside `stop_gate` only as a hint for
+    /// aborting work in progress — between roots, at the end of a root's
+    /// work, and between directories of the readable-tree fallback. Such a
+    /// read may see a stale `false` without consequence: every decision
+    /// that publishes metadata or hands over the watcher re-reads it inside
+    /// the gate, and the gate's release/acquire pair carries the store to
+    /// whoever decides next. That is why the store needs no stronger
+    /// ordering than `Relaxed` to be seen by the check that matters.
     stop: Arc<AtomicBool>,
     /// Serializes every write that decides what the state claims: `Drop`'s
     /// cancellation and state retirement, `install`'s success and
     /// initialization-error publications, and the worker's takeover of the
     /// watcher. Held only across atomic loads/stores and brief state
     /// writes — never across installs, walks or joins.
+    ///
+    /// Lock order is gate before state, everywhere, and nothing takes the
+    /// gate while holding the state lock, so the two can never form a
+    /// cycle. That is what keeps the event callback — which needs the
+    /// state lock and nothing else — clear of a publication: the install
+    /// thread takes the gate and the state lock together, and never holds
+    /// the state lock across a `watch()` call, which on inotify blocks on
+    /// the very thread the callback runs on.
     stop_gate: Arc<Mutex<()>>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -411,11 +427,12 @@ impl HotFileWatcher {
 
 impl Drop for HotFileWatcher {
     fn drop(&mut self) {
-        // Cancel and retire under the gate. `install` checks `stop` before
-        // each root and between directories of the readable-tree fallback;
-        // its final publications and the worker's ownership decision take
-        // this same gate. One critical section, then there is no
-        // publication left to land: one that already happened is cleared
+        // Cancel and retire under the gate. `install` reads `stop` between
+        // roots, at the end of each root's work, and between directories of
+        // the readable-tree fallback, but those reads are only abort hints —
+        // the publication they protect is gated here, together with the
+        // worker's ownership decision. One critical section, then there is
+        // no publication left to land: one that already happened is cleared
         // here, and one that has not yet takes the gate and finds the
         // cancellation. The state lock is held only across the few field
         // writes below; callers must not hold it around this drop.
@@ -540,10 +557,12 @@ pub fn attribute_to_pools(
 /// the watcher is still alive. Tests use it to observe and cancel a
 /// partially completed install; production passes `None`.
 ///
-/// Cancellation is checked before each root and between directories of the
-/// readable-tree fallback; those checks only abort, they publish nothing.
-/// A cancelled call returns `None` and drops the watcher it was building,
-/// which releases any watches already installed.
+/// Cancellation is checked before each root, again at the end of every
+/// root's work (a `watch()` syscall or the readable-tree fallback above
+/// can be interrupted part-way), and once more under `stop_gate` before
+/// the result is published. Any of those aborts the call: it returns
+/// `None`, having published nothing, and dropping the watcher it was
+/// building releases every watch already installed.
 ///
 /// Both final publications — success metadata and the initialization error
 /// — are serialized with cancellation under `stop_gate`, the same gate
@@ -635,24 +654,50 @@ fn install(
             }
             Err(e) => errors.push(describe_watch_error(r, &e)),
         }
+        // Cancellation can arrive *inside* a root rather than between
+        // them: `watch()` is a syscall, and the fallback walk above can be
+        // abandoned part-way down a tree. The match arms have already run
+        // by this point — the fallback arm pushes the root and its skipped
+        // count whatever the walk's outcome — so the local `watched` /
+        // `errors` can describe a root that is only partly watched. This is
+        // where that bookkeeping stops mattering: a root whose traversal
+        // was cut short must not contribute to a completed installation,
+        // so abandon it before processing another root or publishing any
+        // metadata.
+        //
+        // This is the boundary the partial work is produced at. The gated
+        // recheck after the loop would catch the same cancellation before
+        // publishing, so removing this changes no outcome today; it is
+        // kept because the invariant it maintains is local and should not
+        // depend on a later check far away to hold. Note that no test can
+        // reach it deterministically — cancellation arrives from `Drop` on
+        // another thread, and every per-root seam the tests have runs
+        // *after* this check — so it is argued, not covered.
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
         if let Some(hook) = on_root.as_deref_mut() {
             hook(r.as_path());
         }
     }
     {
-        // The stop recheck and the publication share one critical section,
-        // so no `Drop` can retire the state between them.
+        // The recheck and the publication share one critical section, so
+        // no `Drop` can retire the state between them. A cancellation seen
+        // here abandons the watcher instead of returning it: `Drop` has
+        // already given up ownership, and the publication below would
+        // claim roots for an install nobody is going to keep.
         let _gate = stop_gate.lock().unwrap();
-        if !stop.load(Ordering::Relaxed) {
-            let mut s = state.lock().unwrap();
-            // Report the roots we are actually watching, not the ones we
-            // were asked to: the tab draws this as "watch <paths>", and
-            // listing a path no event will ever come from reads as a bug
-            // in the watcher rather than a bad line in a config file.
-            s.watch_roots = watched;
-            if !errors.is_empty() {
-                s.error = Some(errors.join("; "));
-            }
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut s = state.lock().unwrap();
+        // Report the roots we are actually watching, not the ones we
+        // were asked to: the tab draws this as "watch <paths>", and
+        // listing a path no event will ever come from reads as a bug
+        // in the watcher rather than a bad line in a config file.
+        s.watch_roots = watched;
+        if !errors.is_empty() {
+            s.error = Some(errors.join("; "));
         }
     }
 
@@ -1119,8 +1164,15 @@ mod tests {
     /// `(device, inode)` pairs for every live inotify watch in this process,
     /// read from `/proc/self/fdinfo`. Matching on the pair rather than the
     /// inode alone keeps a watch on some other filesystem with a colliding
-    /// inode number from passing for the one under test. `None` when
-    /// `/proc` is not there to read.
+    /// inode number from passing for the one under test.
+    ///
+    /// `None` means the mechanism is unusable — `/proc/self/fdinfo` could
+    /// not be read at all — while `Some` means it worked, *including* when
+    /// the set comes back empty. An empty set is an observation ("no
+    /// watches are live right now"), not the absence of one. Callers gate
+    /// kernel-facing assertions on that distinction, and
+    /// [`wait_for_watch_release`] re-checks it on every poll rather than
+    /// once up front.
     #[cfg(target_os = "linux")]
     fn inotify_watched_files() -> Option<std::collections::HashSet<(u64, u64)>> {
         let mut files = std::collections::HashSet::new();
@@ -1167,19 +1219,37 @@ mod tests {
     /// Wait until `key` has no live inotify watch. `notify`'s `Drop` hands
     /// the inotify fd to its event-loop thread, so the kernel-side release
     /// lands shortly after the watcher drops; wait for that observable
-    /// state instead of assuming it is instantaneous. A real deadline
-    /// bounds total time, scanning `/proc` included, and only limits
-    /// failure detection — it decides no outcome here.
+    /// state instead of assuming it is instantaneous.
+    ///
+    /// The deadline bounds the wait; it never decides the outcome on its
+    /// own, which is why the result distinguishes three cases:
+    ///
+    /// - `Some(true)` — the watch was observed to be gone.
+    /// - `Some(false)` — the deadline expired while the mechanism stayed
+    ///   readable and the watch was still live. This is the only outcome
+    ///   that is evidence of a leak.
+    /// - `None` — `/proc/self/fdinfo` stopped being readable before the
+    ///   question could be settled. Nothing was observed either way, so a
+    ///   caller must not read this as a leak: whether the file was
+    ///   readable when the wait started says nothing about it staying
+    ///   readable throughout.
+    ///
+    /// Folding the last two into one boolean would let an environment that
+    /// loses `/proc` mid-wait masquerade as a resource leak.
     #[cfg(target_os = "linux")]
-    fn wait_for_watch_release(key: (u64, u64)) -> bool {
+    fn wait_for_watch_release(key: (u64, u64)) -> Option<bool> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match inotify_watched_files() {
-                Some(w) if !w.contains(&key) => return true,
-                Some(_) if Instant::now() >= deadline => return false,
-                Some(_) => thread::sleep(Duration::from_millis(1)),
-                None => return false,
+            // An empty set is a real observation, so only `None` — `/proc`
+            // unreadable — ends the wait without an answer.
+            let live = inotify_watched_files()?;
+            if !live.contains(&key) {
+                return Some(true);
             }
+            if Instant::now() >= deadline {
+                return Some(false);
+            }
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -1199,17 +1269,18 @@ mod tests {
         std::fs::create_dir_all(&second).expect("second dir");
         let _guard = TempDirGuard(dir.clone());
 
-        // No fdinfo to read: the kernel half of the guarantee is not
-        // observable here. The structural half is still pinned by
-        // `a_cancelled_install_installs_and_publishes_nothing`.
-        let Some(before) = inotify_watched_files() else {
-            return;
-        };
         let first_key = file_key(&first);
-        assert!(
-            !before.contains(&first_key),
-            "the test directory is already watched"
-        );
+        // Precondition only: when the initial observation works, a watch
+        // already on the test directory would make the release check below
+        // meaningless. An unreadable `/proc/self/fdinfo` skips this one
+        // check and nothing else.
+        let observed = inotify_watched_files();
+        if let Some(before) = &observed {
+            assert!(
+                !before.contains(&first_key),
+                "the test directory is already watched"
+            );
+        }
 
         let state = Arc::new(Mutex::new(HotFileState::default()));
         let stop = AtomicBool::new(false);
@@ -1219,8 +1290,8 @@ mod tests {
         let mut on_root = |root: &Path| {
             roots_seen += 1;
             // `watch()` is request/reply with `notify`'s event loop, so by
-            // now the first root's kernel watch is live: cancelling here
-            // is genuinely mid-install, not before it started.
+            // now the first root's kernel watch is live: cancelling here is
+            // genuinely mid-install, not before it started.
             watched_at_cancel = inotify_watched_files().map(|w| w.contains(&file_key(root)));
             stop.store(true, Ordering::Relaxed);
         };
@@ -1237,13 +1308,20 @@ mod tests {
             roots_seen, 1,
             "the cancelled install must not touch the second root"
         );
-        assert_eq!(
+        // Judged on the observation taken at cancellation time, not on
+        // whether `/proc` happened to be readable earlier: `Some(false)` is
+        // a working observation that saw no watch, which is a defect,
+        // while `None` only means the question could not be answered.
+        assert_ne!(
             watched_at_cancel,
-            Some(true),
-            "the first root was watched when the cancellation arrived"
+            Some(false),
+            "the first root was not watched when the cancellation arrived"
         );
-        assert!(
+        // `Some(false)` is a confirmed leak; `None` only means `/proc` went
+        // away mid-wait, which proves nothing either way.
+        assert_ne!(
             wait_for_watch_release(first_key),
+            Some(false),
             "the partial watch must be released with the cancelled install"
         );
         let s = state.lock().unwrap();
@@ -1252,6 +1330,126 @@ mod tests {
             "a cancelled install publishes nothing"
         );
         assert!(s.error.is_none(), "{:?}", s.error);
+    }
+
+    /// The failure this guards against. `Drop` takes the gate while the
+    /// install thread is still working on one root, and the readable-tree
+    /// fallback is a walk over a whole subtree that checks `stop` only
+    /// between directories. The loop used to carry on from there as if the
+    /// root had been watched in full — appending it to `watched`, and for
+    /// the last root running the publication and returning the partially
+    /// built watcher.
+    ///
+    /// The invariant now enforced: cancellation observed at either the
+    /// end-of-root check or the final gated check makes `install` return
+    /// `None`, publish nothing, and drop the watcher it was building.
+    ///
+    /// What this test actually forces, precisely: the per-root hook runs
+    /// *after* the end-of-root check, so on this single-root list the
+    /// cancellation is first seen by the **final gated check**, in the
+    /// window between the last root completing and the publication. It
+    /// does **not** inject cancellation into the middle of
+    /// `watch_readable_tree` — a root is cancelled from outside the
+    /// install thread only by `Drop`, and nothing lets a test make that
+    /// land inside a synchronous traversal without adding a seam to
+    /// production code. The traversal's own mid-walk abort is pinned
+    /// separately by `a_cancelled_walk_stops_before_the_next_directory`.
+    ///
+    /// Two runs of the same tree. The first is the control: its recursive
+    /// watch fails on an unreadable descendant, the recovery branch runs,
+    /// and the skipped directory is reported — that is what proves the
+    /// recovery path is the one under test here and not an ordinary
+    /// install. The second run cancels and must come back empty-handed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cancelled_fallback_install_abandons_the_watcher_it_was_building() {
+        use std::os::unix::fs::PermissionsExt;
+        /// Gives `locked` its mode back on every way out. Declared after
+        /// the temp-dir guard so it runs first: an unreadable directory
+        /// left behind makes `remove_dir_all` fail, which would leak this
+        /// tree into `/tmp` for every future run.
+        struct RestoreMode(PathBuf);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("diskwatch-fallback-cancel-{}", std::process::id()));
+        let locked = dir.join("locked");
+        let readable = dir.join("readable");
+        std::fs::create_dir_all(locked.join("inner")).expect("locked dir");
+        std::fs::create_dir_all(&readable).expect("readable dir");
+        let _guard = TempDirGuard(dir.clone());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _mode = RestoreMode(locked.clone());
+        if std::fs::read_dir(&locked).is_ok() {
+            return; // running as root: the recursive watch cannot fail
+        }
+
+        // Control: the recovery branch really is the one under test here.
+        let control_state = Arc::new(Mutex::new(HotFileState::default()));
+        let control_stop = AtomicBool::new(false);
+        let control_watcher = install(
+            std::slice::from_ref(&dir),
+            &control_state,
+            &control_stop,
+            &Mutex::new(()),
+            None,
+        );
+        assert!(
+            control_watcher.is_some(),
+            "the control install must complete"
+        );
+        let control = control_state.lock().unwrap();
+        assert_eq!(control.watch_roots, vec![dir.clone()]);
+        let control_err = control
+            .error
+            .clone()
+            .expect("the skipped directory should be reported");
+        assert!(control_err.contains("locked"), "{control_err}");
+        drop(control);
+        drop(control_watcher);
+
+        // There is deliberately no "not watched yet" precondition on the second
+        // run: the control run just watched this very tree, and `notify`
+        // releases the kernel's watches asynchronously, so demanding a
+        // clean slate before the cancellation run would only add a way to
+        // be flaky.
+
+        let state = Arc::new(Mutex::new(HotFileState::default()));
+        let stop = AtomicBool::new(false);
+        let stop_gate = Mutex::new(());
+        let mut on_root = |_: &Path| stop.store(true, Ordering::Relaxed);
+        let watcher = install(
+            std::slice::from_ref(&dir),
+            &state,
+            &stop,
+            &stop_gate,
+            Some(&mut on_root),
+        );
+
+        assert!(
+            watcher.is_none(),
+            "a cancelled install must not hand back the half-built watcher"
+        );
+        let s = state.lock().unwrap();
+        assert!(
+            s.watch_roots.is_empty(),
+            "a cancelled install publishes nothing, got {:?}",
+            s.watch_roots
+        );
+        assert!(s.error.is_none(), "{:?}", s.error);
+        drop(s);
+        // The kernel half of the guarantee, and the only part that needs
+        // `/proc`. A confirmed leak fails; a `/proc` that went away mid-wait
+        // is not a leak and is not reported as one.
+        assert_ne!(
+            wait_for_watch_release(file_key(&readable)),
+            Some(false),
+            "the abandoned fallback must release the watches it already made"
+        );
     }
 
     /// The fallback walk checks cancellation before each directory, so a
@@ -1271,6 +1469,140 @@ mod tests {
         assert_eq!(
             watch_readable_tree(&mut watcher, &missing, &running),
             vec![missing]
+        );
+    }
+
+    /// A watcher that requests cancellation part-way through its own
+    /// traversal.
+    ///
+    /// `watch_readable_tree` is generic over `impl Watcher` and calls
+    /// `watch` once per directory it descends into, so flipping `stop` from
+    /// inside `watch` puts the flag mid-traversal with no second thread and
+    /// no sleeps involved. Test-only: `install` builds its own concrete
+    /// watcher and offers no such seam, which is why this is where the
+    /// mid-walk abort is pinned rather than through `install`.
+    struct CancelAfterNWatches<'a> {
+        inner: notify::RecommendedWatcher,
+        stop: Option<&'a AtomicBool>,
+        remaining: usize,
+    }
+
+    impl Watcher for CancelAfterNWatches<'_> {
+        fn new<F: notify::EventHandler>(
+            handler: F,
+            config: notify::Config,
+        ) -> notify::Result<Self> {
+            // Never used by the walk, which only calls `watch`. Built
+            // without a stop flag so the type stays constructible.
+            Ok(Self {
+                inner: notify::RecommendedWatcher::new(handler, config)?,
+                stop: None,
+                remaining: 0,
+            })
+        }
+
+        fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            let res = self.inner.watch(path, mode);
+            if self.remaining > 0 {
+                self.remaining -= 1;
+                if self.remaining == 0 {
+                    if let Some(stop) = self.stop {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            res
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.inner.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            notify::RecommendedWatcher::kind()
+        }
+    }
+
+    /// `watch_readable_tree`'s per-directory check, exercised where it
+    /// matters: a traversal already under way.
+    ///
+    /// The root is the first directory watched, so the flag goes up from
+    /// inside that `watch` call, while the walk is between iterations. The
+    /// loop's order then decides what "stops" means precisely, and it is
+    /// worth being exact about:
+    ///
+    /// - Iteration 1 lists the root, watches it, and queues both children.
+    /// - Iteration 2 pops one child and *then* tests the flag, so a pop
+    ///   does still happen. That directory is dropped without being listed
+    ///   or watched — the break precedes both.
+    ///
+    /// So what is guaranteed is narrower than "stops before popping
+    /// anything": no watch is installed on either child (asserted below
+    /// from `/proc`), neither child is listed, and nothing is reported as
+    /// skipped. What is *not* claimed: the children are never touched at
+    /// all — the root's listing already enumerated them and stat'd their
+    /// file types while queuing them.
+    ///
+    /// The sibling test above only cancels before the walk starts, which
+    /// the check at the top of the loop catches without any iteration
+    /// having begun. This one needs no scheduling assumptions either: the
+    /// wrapper flips the flag from inside the walk, so the ordering is the
+    /// program's, not the scheduler's.
+    #[test]
+    fn a_cancelled_walk_stops_before_the_next_directory() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-midwalk-{}", std::process::id()));
+        let deep = dir.join("deep");
+        let other = dir.join("other");
+        std::fs::create_dir_all(&deep).expect("deep dir");
+        std::fs::create_dir_all(&other).expect("other dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        let stop = AtomicBool::new(false);
+        let skipped = {
+            let mut watcher = CancelAfterNWatches {
+                inner: notify::recommended_watcher(|_: notify::Result<notify::Event>| {}).unwrap(),
+                stop: Some(&stop),
+                remaining: 1,
+            };
+            let skipped = watch_readable_tree(&mut watcher, &dir, &stop);
+            assert!(
+                stop.load(Ordering::Relaxed),
+                "the walk must have reached the point that cancels it"
+            );
+            // Seen from the kernel's side while the wrapper is still
+            // alive: the root it did watch, and no watch on either child.
+            // This is what pins the "no watch on the children" half of the
+            // contract above; the other half is the `stop` assertion.
+            #[cfg(target_os = "linux")]
+            if let Some(live) = inotify_watched_files() {
+                assert!(
+                    live.contains(&file_key(&dir)),
+                    "the root should be watched by the time the walk stops"
+                );
+                assert!(
+                    !live.contains(&file_key(&deep)),
+                    "an abandoned walk must not watch a queued child"
+                );
+                assert!(
+                    !live.contains(&file_key(&other)),
+                    "an abandoned walk must not watch a queued child"
+                );
+            }
+            skipped
+        };
+        assert!(
+            skipped.is_empty(),
+            "an abandoned walk reports nothing: {:?}",
+            skipped
+        );
+        // The wrapper has dropped by now, so the one watch the abandoned
+        // walk did make — the root's — is gone too. `Some(false)` is a
+        // confirmed leak; `None` only means `/proc` went away mid-wait.
+        #[cfg(target_os = "linux")]
+        assert_ne!(
+            wait_for_watch_release(file_key(&dir)),
+            Some(false),
+            "the abandoned walk's own watch must be released with it"
         );
     }
 
@@ -1394,12 +1726,117 @@ mod tests {
             "a cancelled transfer must not store the watcher"
         );
         #[cfg(target_os = "linux")]
-        assert!(
+        assert_ne!(
             wait_for_watch_release(file_key(&dir)),
+            Some(false),
             "the abandoned watcher must release its watch"
         );
         let s = state.lock().unwrap();
         assert!(s.watch_roots.is_empty(), "{:?}", s.watch_roots);
+        assert!(s.error.is_none(), "{:?}", s.error);
+    }
+
+    /// The gate itself, tested with controlled interleaving rather than by
+    /// racing it.
+    ///
+    /// "No publication can land after `Drop` returns" rests on `install`
+    /// writing `watch_roots` / `error` only while holding `stop_gate`, the
+    /// same gate `Drop` takes to cancel and retire. Holding the gate from
+    /// the test and releasing a worker parked after its last root isolates
+    /// exactly that: the worker must reach the publication and stall on the
+    /// gate, leaving the state on the constructor's optimistic seed. On a
+    /// build that published outside the gate the worker would run straight
+    /// on, and both the signal and the state would show it.
+    ///
+    /// What this proves, operationally: while `stop_gate` is held by
+    /// another thread, a worker that has finished its roots does not
+    /// complete its publication, and completes it as soon as the gate is
+    /// released. `wait()` is not usable for that — it returns on
+    /// `is_finished`, which covers the ownership transfer too.
+    ///
+    /// What the window cannot prove: "no signal arrived within N" is an
+    /// absence, and a worker descheduled for longer than N would look
+    /// identical. So this is strong regression coverage of the gate's
+    /// presence in front of the publication, not a mathematical proof that
+    /// no ungated publication could ever exist. The complementary evidence
+    /// is structural (the publication and the recheck share one critical
+    /// section) plus the randomized stress in
+    /// `a_publication_racing_drop_leaves_no_stale_state`.
+    #[test]
+    fn the_publication_waits_for_the_cancellation_gate() {
+        struct ExitSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for ExitSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        // How long a worker is given to get past a publication that is
+        // meant to be blocked. See this test's docs for what the resulting
+        // absence does and does not establish.
+        const PUBLICATION_STALL_WINDOW: Duration = Duration::from_millis(1000);
+
+        let dir = std::env::temp_dir().join(format!("diskwatch-gatepub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        // Fires the moment `install` returns, before the worker's own
+        // ownership decision — which is gated too, so it must not be
+        // mistaken for the publication getting through.
+        let (past_tx, past_rx) = std::sync::mpsc::channel::<()>();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<()>();
+        let w = HotFileWatcher::start_background_inner(
+            &[dir.as_path()],
+            || (),
+            move || {
+                let _ = past_tx.send(());
+                ExitSignal(exit_tx)
+            },
+            Some(Box::new(move |_root: &Path| {
+                reached_tx.send(()).expect("signal the last root");
+                let _ = go_rx.recv_timeout(Duration::from_secs(5));
+            })),
+        );
+        let state = w.state.clone();
+
+        let gate = w.stop_gate.lock().unwrap();
+        reached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker must reach the last root");
+        let _ = go_tx.send(());
+
+        // How long the worker is given to get past the publication while
+        // the gate is held. Generous on purpose: the worker only has to
+        // return from `install` for this to fail, so the window bounds
+        // scheduler patience, not the work under test.
+        let stalled = past_rx.recv_timeout(PUBLICATION_STALL_WINDOW).is_err();
+        // Still the optimistic seed from the constructor, not the roots the
+        // worker watched: the publication has not happened.
+        let seed = state.lock().unwrap().watch_roots.clone();
+        // Released before any assertion: a failure here must not leave a
+        // worker parked on a gate that this thread still holds, which would
+        // take the whole test binary down with it.
+        drop(gate);
+        assert!(
+            stalled,
+            "install published while the cancellation gate was held"
+        );
+        assert_eq!(
+            seed,
+            vec![dir.clone()],
+            "the seed must survive until the publication is allowed through"
+        );
+
+        past_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the publication must complete once the gate is released");
+        exit_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker must finish after the gate is released");
+        let s = state.lock().unwrap();
+        assert_eq!(s.watch_roots, vec![dir.clone()]);
         assert!(s.error.is_none(), "{:?}", s.error);
     }
 
@@ -1428,7 +1865,10 @@ mod tests {
     /// still passed; at 256 rounds 600/600 runs failed. A green run is
     /// therefore strong evidence, not proof, that the publication is
     /// gated: this is a stress detector for that window, not deterministic
-    /// coverage of it.
+    /// coverage of it. What *is* deterministic is in
+    /// `the_publication_waits_for_the_cancellation_gate`, which pins the
+    /// gate's presence in front of this window rather than its timing
+    /// inside it.
     #[test]
     fn a_publication_racing_drop_leaves_no_stale_state() {
         struct ExitSignal(std::sync::mpsc::Sender<()>);
@@ -1528,9 +1968,12 @@ mod tests {
             exit_rx
                 .recv_timeout(Duration::from_secs(5))
                 .expect("the worker must terminate after the cancellation");
+            // `Some(false)` is a confirmed leak; `None` only means `/proc`
+            // went away mid-wait, which proves nothing either way.
             #[cfg(target_os = "linux")]
-            assert!(
+            assert_ne!(
                 wait_for_watch_release(file_key(&dir)),
+                Some(false),
                 "round {round}: the abandoned watcher must release its watch"
             );
             {
