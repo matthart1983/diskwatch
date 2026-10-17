@@ -86,7 +86,7 @@ impl Options {
             refresh_interval_ms: DEFAULT_REFRESH_INTERVAL_MS,
             temp_unit: TempUnit::Celsius,
             visible_columns: VisibleColumns(VisibleColumns::ALL),
-            watch_roots: collect::hot_files::default_roots(),
+            watch_roots: Vec::new(),
             config_source: None,
             config_warnings: Vec::new(),
         }
@@ -327,7 +327,9 @@ impl App {
         smart.refresh_if_due(&devices);
         let root_refs: Vec<&std::path::Path> =
             opts.watch_roots.iter().map(|p| p.as_path()).collect();
-        let hot_files = collect::hot_files::HotFileWatcher::start(&root_refs);
+        // Install watches off the startup path: a recursive watch of $HOME
+        // can take seconds, and that must not gate the first frame.
+        let hot_files = collect::hot_files::HotFileWatcher::start_background(&root_refs);
         Self {
             active_tab: opts.start_tab,
             view: opts.view,

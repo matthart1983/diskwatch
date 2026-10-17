@@ -19,7 +19,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use notify::{
@@ -134,87 +136,81 @@ impl HotFileState {
 }
 
 /// Owner of the watcher + shared state. Drop this to stop watching.
+///
+/// The watcher may be installed either synchronously ([`Self::start`]) or
+/// on a background thread ([`Self::start_background`]); in both cases the
+/// shared `state` is the same `Arc`, and `Drop` stops the thread (if any)
+/// and releases the underlying OS watcher.
 pub struct HotFileWatcher {
     pub state: Arc<Mutex<HotFileState>>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Arc<Mutex<Option<notify::RecommendedWatcher>>>,
+    stop: Arc<AtomicBool>,
+    #[cfg(test)]
+    ready: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 impl HotFileWatcher {
-    pub fn start(roots: &[&Path]) -> Self {
+    /// Begin watching on a background thread and return immediately.
+    ///
+    /// The shared `state` is populated as the watches are installed, so the
+    /// UI can render without waiting for a large tree to be walked. Used by
+    /// the TUI startup path, where blocking on tens of thousands of
+    /// directories would stall the first frame.
+    pub fn start_background(roots: &[&Path]) -> Self {
+        let roots: Vec<PathBuf> = roots.iter().map(|p| p.to_path_buf()).collect();
         let state = Arc::new(Mutex::new(HotFileState::default()));
-        let state_w = state.clone();
-        let watcher_result =
-            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                let Ok(event) = result else { return };
-                let kind = ActivityKind::from_event(&event.kind);
-                // notify can emit multiple paths per event (e.g. rename). We
-                // record each path once.
-                let Ok(mut s) = state_w.lock() else { return };
-                for p in event.paths {
-                    s.record(p, kind);
-                }
-            });
-
-        let mut watcher = match watcher_result {
-            Ok(w) => w,
-            Err(e) => {
-                state.lock().unwrap().error = Some(format!("watcher init failed: {}", e));
-                return Self {
-                    state,
-                    _watcher: None,
-                };
-            }
-        };
-
-        // One error slot, many roots. Assigning per-failure would keep
-        // only the last one, and a *later success* used to leave a stale
-        // error sitting in the slot with no failing root to explain it.
-        // With user-supplied paths a typo is the common case, not the
-        // exotic one, so collect every failure and report them together.
-        let mut errors: Vec<String> = Vec::new();
-        let mut watched: Vec<PathBuf> = Vec::new();
-        for r in roots {
-            if !r.exists() {
-                errors.push(format!("{}: no such path", r.display()));
-                continue;
-            }
-            match watcher.watch(r, RecursiveMode::Recursive) {
-                Ok(()) => watched.push(r.to_path_buf()),
-                // `notify` abandons a whole recursive root at the first
-                // directory it can't open (rootless-container storage under
-                // $HOME is enough), leaving a random partial watch behind.
-                // Walk it ourselves and skip what we can't read instead.
-                Err(e) if is_unreadable_descendant(r, &e) => {
-                    let skipped = watch_readable_tree(&mut watcher, r);
-                    watched.push(r.to_path_buf());
-                    if let Some(first) = skipped.first() {
-                        errors.push(format!(
-                            "{}: {} unreadable director{} not watched (e.g. {})",
-                            r.display(),
-                            skipped.len(),
-                            if skipped.len() == 1 { "y" } else { "ies" },
-                            first.display()
-                        ));
-                    }
-                }
-                Err(e) => errors.push(describe_watch_error(r, &e)),
-            }
-        }
+        // Optimistic: the roots we were asked for, until the thread reports
+        // which ones actually took. Keeps the banner useful in the meantime.
         {
             let mut s = state.lock().unwrap();
-            // Report the roots we are actually watching, not the ones we
-            // were asked to: the tab draws this as "watch <paths>", and
-            // listing a path no event will ever come from reads as a bug
-            // in the watcher rather than a bad line in a config file.
-            s.watch_roots = watched;
-            if !errors.is_empty() {
-                s.error = Some(errors.join("; "));
-            }
+            s.watch_roots = roots.clone();
         }
+        let watcher = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let ready = Arc::new(AtomicBool::new(false));
+
+        let state_t = state.clone();
+        let watcher_t = watcher.clone();
+        let stop_t = stop.clone();
+        #[cfg(test)]
+        let ready_t = ready.clone();
+        let roots_t = roots.clone();
+        let handle = thread::spawn(move || {
+            if let Some(w) = install(&roots_t, &state_t, &stop_t) {
+                if !stop_t.load(Ordering::Relaxed) {
+                    *watcher_t.lock().unwrap() = Some(w);
+                }
+            }
+            #[cfg(test)]
+            ready_t.store(true, Ordering::Relaxed);
+            // Stay alive (and keep the watcher alive) until dropped.
+            while !stop_t.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
 
         Self {
             state,
-            _watcher: Some(watcher),
+            _watcher: watcher,
+            stop,
+            #[cfg(test)]
+            ready,
+            handle: Some(handle),
+        }
+    }
+
+    /// Block until the background installation has finished (or failed).
+    /// Useful for tests and for callers that need `watch_roots` / `error`
+    /// to be final.
+    #[cfg(test)]
+    pub fn wait(&self) {
+        if let Some(handle) = &self.handle {
+            while !self.ready.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = handle;
         }
     }
 
@@ -296,6 +292,15 @@ impl HotFileWatcher {
     /// real count to clamp against.
     pub fn active_count(&self) -> usize {
         self.state.lock().unwrap().activity.len()
+    }
+}
+
+impl Drop for HotFileWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -389,6 +394,87 @@ pub fn attribute_to_pools(
     out
 }
 
+/// Install watches for `roots` into `state`, returning the watcher when
+/// successful. Shared by the synchronous and background entry points so the
+/// two cannot drift apart.
+fn install(
+    roots: &[PathBuf],
+    state: &Arc<Mutex<HotFileState>>,
+    stop: &AtomicBool,
+) -> Option<notify::RecommendedWatcher> {
+    let state_w = state.clone();
+    let watcher_result =
+        notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+            let Ok(event) = result else { return };
+            let kind = ActivityKind::from_event(&event.kind);
+            // notify can emit multiple paths per event (e.g. rename). We
+            // record each path once.
+            let Ok(mut s) = state_w.lock() else { return };
+            for p in event.paths {
+                s.record(p, kind);
+            }
+        });
+
+    let mut watcher = match watcher_result {
+        Ok(w) => w,
+        Err(e) => {
+            state.lock().unwrap().error = Some(format!("watcher init failed: {}", e));
+            return None;
+        }
+    };
+
+    // One error slot, many roots. Assigning per-failure would keep
+    // only the last one, and a *later success* used to leave a stale
+    // error sitting in the slot with no failing root to explain it.
+    // With user-supplied paths a typo is the common case, not the
+    // exotic one, so collect every failure and report them together.
+    let mut errors: Vec<String> = Vec::new();
+    let mut watched: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        if !r.exists() {
+            errors.push(format!("{}: no such path", r.display()));
+            continue;
+        }
+        match watcher.watch(r, RecursiveMode::Recursive) {
+            Ok(()) => watched.push(r.clone()),
+            // `notify` abandons a whole recursive root at the first
+            // directory it can't open (rootless-container storage under
+            // $HOME is enough), leaving a random partial watch behind.
+            // Walk it ourselves and skip what we can't read instead.
+            Err(e) if is_unreadable_descendant(r, &e) => {
+                let skipped = watch_readable_tree(&mut watcher, r, stop);
+                watched.push(r.clone());
+                if let Some(first) = skipped.first() {
+                    errors.push(format!(
+                        "{}: {} unreadable director{} not watched (e.g. {})",
+                        r.display(),
+                        skipped.len(),
+                        if skipped.len() == 1 { "y" } else { "ies" },
+                        first.display()
+                    ));
+                }
+            }
+            Err(e) => errors.push(describe_watch_error(r, &e)),
+        }
+    }
+    if !stop.load(Ordering::Relaxed) {
+        let mut s = state.lock().unwrap();
+        // Report the roots we are actually watching, not the ones we
+        // were asked to: the tab draws this as "watch <paths>", and
+        // listing a path no event will ever come from reads as a bug
+        // in the watcher rather than a bad line in a config file.
+        s.watch_roots = watched;
+        if !errors.is_empty() {
+            s.error = Some(errors.join("; "));
+        }
+    }
+
+    Some(watcher)
+}
+
 /// Sensible default roots that show real user activity without drowning
 /// in /System churn. /private/tmp and /private/var/log are useful on
 /// macOS; on Linux we want /home and /var/log; on Windows we want
@@ -441,10 +527,13 @@ fn is_unreadable_descendant(root: &Path, e: &notify::Error) -> bool {
 /// Unlike a recursive watch this does not pick up directories created
 /// after startup, which is the price of not losing the whole root to one
 /// unreadable directory.
-fn watch_readable_tree(watcher: &mut impl Watcher, root: &Path) -> Vec<PathBuf> {
+fn watch_readable_tree(watcher: &mut impl Watcher, root: &Path, stop: &AtomicBool) -> Vec<PathBuf> {
     let mut skipped = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => {
@@ -673,7 +762,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("diskwatch-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let missing = dir.join("diskwatch-does-not-exist-49bd2f");
-        let w = HotFileWatcher::start(&[dir.as_path(), missing.as_path()]);
+        let w = HotFileWatcher::start_background(&[dir.as_path(), missing.as_path()]);
+        w.wait();
         let (_, roots, err) = w.snapshot_meta();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(roots, vec![dir.clone()], "the good root is still watched");
@@ -700,7 +790,8 @@ mod tests {
         std::fs::create_dir_all(locked.join("inner")).expect("locked dir");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
         let readable = std::fs::read_dir(&locked).is_ok();
-        let w = HotFileWatcher::start(&[dir.as_path()]);
+        let w = HotFileWatcher::start_background(&[dir.as_path()]);
+        w.wait();
         let (_, roots, err) = w.snapshot_meta();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
