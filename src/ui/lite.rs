@@ -1076,6 +1076,8 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
             // The homelab-without-privileges case is the target persona,
             // not an edge case: say what's missing rather than looking idle.
             format!("file activity unavailable — {e}")
+        } else if app.hot_files.installing() {
+            "installing watches…".to_string()
         } else if !lite.filter_text.is_empty() {
             "no files match".to_string()
         } else {

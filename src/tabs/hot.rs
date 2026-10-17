@@ -94,7 +94,12 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
     // Roots and errors are drawn together, not either/or. One bad path in
     // a configured list used to hide every good one behind its error,
     // which read as "nothing is being watched" when most of it was.
-    if roots.is_empty() {
+    if roots.is_empty() && app.hot_files.installing() {
+        spans.push(Span::styled(
+            "installing watches…",
+            Style::default().fg(p::dim()),
+        ));
+    } else if roots.is_empty() {
         spans.push(Span::styled("(no roots)", Style::default().fg(p::dim())));
     } else {
         let joined: Vec<String> = roots.iter().map(|p| p.display().to_string()).collect();
@@ -238,7 +243,9 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     let page = ranked.get(offset..).unwrap_or(&[]);
     if page.is_empty() {
         let s = app.hot_files.state.lock().unwrap();
-        let msg = if s.error.is_some() {
+        let msg = if s.installing {
+            "  installing watches…"
+        } else if s.error.is_some() {
             "  watcher not running — see banner below"
         } else {
             "  waiting for filesystem activity…"

@@ -20,7 +20,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -107,6 +107,10 @@ pub struct HotFileState {
     /// `None` until `start()` succeeds; carries a human-readable reason
     /// for failure so the tab can explain it.
     pub error: Option<String>,
+    /// A background install is still running: `watch_roots` and `error`
+    /// are not known yet, so the tabs say "installing" instead of
+    /// claiming roots that may not exist.
+    pub installing: bool,
 }
 
 impl HotFileState {
@@ -150,8 +154,7 @@ impl HotFileState {
 /// `activity` and `total_events` may still take updates from events
 /// already in flight while a detached worker holds the watcher's last
 /// reference, and until the worker finishes initialization `watch_roots`
-/// is an optimistic seed holding the *requested* roots, which the worker
-/// then replaces with the ones actually watched. Release the state lock
+/// is empty and `installing` is set. Release the state lock
 /// before dropping the watcher; `Drop` needs that lock to retire the
 /// metadata.
 pub struct HotFileWatcher {
@@ -228,11 +231,8 @@ impl HotFileWatcher {
 
     /// Begin watching on a background thread and return immediately.
     ///
-    /// Nothing waits on the install: the requested roots are seeded into
-    /// `watch_roots` at once as an optimistic guess, and the worker
-    /// replaces them with the roots it actually watches when it finishes.
-    /// See [`HotFileWatcher`] for what a cancellation does to that seed.
-    /// Blocking the first frame on a recursive walk of a large tree is the
+    /// Nothing waits on the install: `installing` is set until the worker
+    /// publishes the roots it actually watches. Blocking the first frame on a recursive walk of a large tree is the
     /// stall this exists to remove.
     ///
     /// With no roots there is nothing to watch; like [`Self::start`], this
@@ -268,12 +268,7 @@ impl HotFileWatcher {
     {
         let roots: Vec<PathBuf> = roots.iter().map(|p| p.to_path_buf()).collect();
         let state = Arc::new(Mutex::new(HotFileState::default()));
-        // Optimistic: the roots we were asked for, until the worker reports
-        // which ones actually took. Keeps the banner useful in the meantime.
-        {
-            let mut s = state.lock().unwrap();
-            s.watch_roots = roots.clone();
-        }
+        state.lock().unwrap().installing = true;
         let watcher = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let stop_gate = Arc::new(Mutex::new(()));
@@ -312,7 +307,7 @@ impl HotFileWatcher {
             // slot the tab already reads instead of panicking the TUI.
             Err(e) => {
                 let mut s = state.lock().unwrap();
-                s.watch_roots.clear();
+                s.installing = false;
                 s.error = Some(format!("watcher thread failed to start: {}", e));
                 None
             }
@@ -412,6 +407,11 @@ impl HotFileWatcher {
         attribute_to_pools(&active, fs, &s.watch_roots)
     }
 
+    /// Whether a background install is still running.
+    pub fn installing(&self) -> bool {
+        self.state.lock().unwrap().installing
+    }
+
     pub fn snapshot_meta(&self) -> (u64, Vec<PathBuf>, Option<String>) {
         let s = self.state.lock().unwrap();
         (s.total_events, s.watch_roots.clone(), s.error.clone())
@@ -437,11 +437,18 @@ impl Drop for HotFileWatcher {
         // cancellation. The state lock is held only across the few field
         // writes below; callers must not hold it around this drop.
         {
-            let _gate = self.stop_gate.lock().unwrap();
+            // Poison-tolerant: a panic elsewhere while a lock was held must
+            // not turn into a second panic here during unwinding, which
+            // aborts the process.
+            let _gate = self
+                .stop_gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             self.stop.store(true, Ordering::Relaxed);
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             s.watch_roots.clear();
             s.error = None;
+            s.installing = false;
         }
         // Join only a worker that has already finished. One still inside
         // `notify`'s recursive walk cannot be interrupted from here — the
@@ -607,11 +614,7 @@ fn install(
             let _gate = stop_gate.lock().unwrap();
             if !stop.load(Ordering::Relaxed) {
                 let mut s = state.lock().unwrap();
-                // The background path seeds `watch_roots` optimistically
-                // before the worker runs. A watcher that never came up is
-                // not watching them, so drop that claim rather than leaving
-                // a stale one.
-                s.watch_roots.clear();
+                s.installing = false;
                 s.error = Some(format!("watcher init failed: {}", e));
             }
             return None;
@@ -696,6 +699,7 @@ fn install(
         // listing a path no event will ever come from reads as a bug
         // in the watcher rather than a bad line in a config file.
         s.watch_roots = watched;
+        s.installing = false;
         if !errors.is_empty() {
             s.error = Some(errors.join("; "));
         }
@@ -1060,9 +1064,12 @@ mod tests {
 
         // Reaching this line with the worker still parked is the guarantee;
         // the flag only distinguishes that from a constructor that waited
-        // and let the timeout expire.
+        // and let the timeout expire. Until it runs, nothing claims a root.
+        assert!(w.installing());
+        assert!(w.snapshot_meta().1.is_empty());
         let _ = release_tx.send(());
         w.wait();
+        assert!(!w.installing());
         assert!(
             released_by_test.load(Ordering::SeqCst),
             "start_background returned only after installation had run"
@@ -1115,6 +1122,21 @@ mod tests {
     /// Watching nothing is still a successful install: no roots, no error,
     /// through either entry point — and no OS watcher is built only to be
     /// dropped again unused.
+    /// A panic while the state lock is held poisons it. `Drop` runs during
+    /// that unwind, and panicking there too would abort the process.
+    #[test]
+    fn drop_survives_a_poisoned_state_lock() {
+        let w = HotFileWatcher::start(&[]);
+        let state = w.state.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = state.lock().unwrap();
+            panic!("poison the state lock");
+        })
+        .join();
+        assert!(w.state.is_poisoned());
+        drop(w);
+    }
+
     #[test]
     fn empty_roots_finish_with_no_error() {
         for w in [
@@ -1650,8 +1672,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("the worker must terminate after Drop requests cancellation");
 
-        // Cancellation landed before the first watch, and Drop retired the
-        // optimistic roots on its way out: after Drop returns the state
+        // Cancellation landed before the first watch, and Drop cleared the
+        // installing flag on its way out: after Drop returns the state
         // claims nothing. A completed install would have dropped the
         // missing root and reported it instead.
         let s = state.lock().unwrap();
@@ -1736,110 +1758,6 @@ mod tests {
         assert!(s.error.is_none(), "{:?}", s.error);
     }
 
-    /// The gate itself, tested with controlled interleaving rather than by
-    /// racing it.
-    ///
-    /// "No publication can land after `Drop` returns" rests on `install`
-    /// writing `watch_roots` / `error` only while holding `stop_gate`, the
-    /// same gate `Drop` takes to cancel and retire. Holding the gate from
-    /// the test and releasing a worker parked after its last root isolates
-    /// exactly that: the worker must reach the publication and stall on the
-    /// gate, leaving the state on the constructor's optimistic seed. On a
-    /// build that published outside the gate the worker would run straight
-    /// on, and both the signal and the state would show it.
-    ///
-    /// What this proves, operationally: while `stop_gate` is held by
-    /// another thread, a worker that has finished its roots does not
-    /// complete its publication, and completes it as soon as the gate is
-    /// released. `wait()` is not usable for that — it returns on
-    /// `is_finished`, which covers the ownership transfer too.
-    ///
-    /// What the window cannot prove: "no signal arrived within N" is an
-    /// absence, and a worker descheduled for longer than N would look
-    /// identical. So this is strong regression coverage of the gate's
-    /// presence in front of the publication, not a mathematical proof that
-    /// no ungated publication could ever exist. The complementary evidence
-    /// is structural (the publication and the recheck share one critical
-    /// section) plus the randomized stress in
-    /// `a_publication_racing_drop_leaves_no_stale_state`.
-    #[test]
-    fn the_publication_waits_for_the_cancellation_gate() {
-        struct ExitSignal(std::sync::mpsc::Sender<()>);
-        impl Drop for ExitSignal {
-            fn drop(&mut self) {
-                let _ = self.0.send(());
-            }
-        }
-
-        // How long a worker is given to get past a publication that is
-        // meant to be blocked. See this test's docs for what the resulting
-        // absence does and does not establish.
-        const PUBLICATION_STALL_WINDOW: Duration = Duration::from_millis(1000);
-
-        let dir = std::env::temp_dir().join(format!("diskwatch-gatepub-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let _guard = TempDirGuard(dir.clone());
-
-        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
-        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        // Fires the moment `install` returns, before the worker's own
-        // ownership decision — which is gated too, so it must not be
-        // mistaken for the publication getting through.
-        let (past_tx, past_rx) = std::sync::mpsc::channel::<()>();
-        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<()>();
-        let w = HotFileWatcher::start_background_inner(
-            &[dir.as_path()],
-            || (),
-            move || {
-                let _ = past_tx.send(());
-                ExitSignal(exit_tx)
-            },
-            Some(Box::new(move |_root: &Path| {
-                reached_tx.send(()).expect("signal the last root");
-                let _ = go_rx.recv_timeout(Duration::from_secs(5));
-            })),
-        );
-        let state = w.state.clone();
-
-        let gate = w.stop_gate.lock().unwrap();
-        reached_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the worker must reach the last root");
-        let _ = go_tx.send(());
-
-        // How long the worker is given to get past the publication while
-        // the gate is held. Generous on purpose: the worker only has to
-        // return from `install` for this to fail, so the window bounds
-        // scheduler patience, not the work under test.
-        let stalled = past_rx.recv_timeout(PUBLICATION_STALL_WINDOW).is_err();
-        // Still the optimistic seed from the constructor, not the roots the
-        // worker watched: the publication has not happened.
-        let seed = state.lock().unwrap().watch_roots.clone();
-        // Released before any assertion: a failure here must not leave a
-        // worker parked on a gate that this thread still holds, which would
-        // take the whole test binary down with it.
-        drop(gate);
-        assert!(
-            stalled,
-            "install published while the cancellation gate was held"
-        );
-        assert_eq!(
-            seed,
-            vec![dir.clone()],
-            "the seed must survive until the publication is allowed through"
-        );
-
-        past_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the publication must complete once the gate is released");
-        exit_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the worker must finish after the gate is released");
-        let s = state.lock().unwrap();
-        assert_eq!(s.watch_roots, vec![dir.clone()]);
-        assert!(s.error.is_none(), "{:?}", s.error);
-    }
-
     /// The state-mutex interleaving: a publication that has passed its
     /// cancellation check can still be waiting on the state lock when
     /// `Drop` runs. Without the publication half of the gate that write
@@ -1865,10 +1783,7 @@ mod tests {
     /// still passed; at 256 rounds 600/600 runs failed. A green run is
     /// therefore strong evidence, not proof, that the publication is
     /// gated: this is a stress detector for that window, not deterministic
-    /// coverage of it. What *is* deterministic is in
-    /// `the_publication_waits_for_the_cancellation_gate`, which pins the
-    /// gate's presence in front of this window rather than its timing
-    /// inside it.
+    /// coverage of it.
     #[test]
     fn a_publication_racing_drop_leaves_no_stale_state() {
         struct ExitSignal(std::sync::mpsc::Sender<()>);

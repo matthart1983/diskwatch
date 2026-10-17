@@ -567,6 +567,7 @@ fn draw_hot_files(f: &mut Frame, area: Rect, app: &App) {
         // Say why it's empty: nothing watched and nothing happening read
         // the same on screen but need different fixes.
         let why = match (&err, roots.is_empty()) {
+            (None, true) if app.hot_files.installing() => "  installing watches…".to_string(),
             (Some(e), true) => format!("  not watching: {e}"),
             (_, true) => "  no watch roots".to_string(),
             _ => "  no file activity yet".to_string(),

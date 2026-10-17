@@ -1998,6 +1998,7 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
     if total == 0 {
         let (_, roots, err) = app.hot_files.snapshot_meta();
         let msg = match (err, roots.len()) {
+            (None, 0) if app.hot_files.installing() => "installing watches…".to_string(),
             // Some roots watched *and* an error means a partial failure —
             // one bad path in a configured list. Saying the watcher is
             // unavailable would be wrong; most of it is working.
