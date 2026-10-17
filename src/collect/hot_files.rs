@@ -137,30 +137,122 @@ impl HotFileState {
 
 /// Owner of the watcher + shared state. Drop this to stop watching.
 ///
-/// The watcher may be installed either synchronously ([`Self::start`]) or
-/// on a background thread ([`Self::start_background`]); in both cases the
-/// shared `state` is the same `Arc`, and `Drop` stops the thread (if any)
-/// and releases the underlying OS watcher.
+/// Installed either synchronously ([`Self::start`]) or in the background
+/// ([`Self::start_background`]); both go through `install`, so root
+/// filtering, error reporting and cleanup cannot drift between them.
+/// With no roots neither builds anything — see [`Self::idle`].
+///
+/// Cancellation is strict for the metadata, not for the whole state.
+/// Dropping retires `watch_roots` / `error` under the same gate that
+/// serializes publication, so once `Drop` returns those two fields are
+/// final: they can never be republished, not even by a publication that
+/// was already in flight. The rest of the state keeps its normal life —
+/// `activity` and `total_events` may still take updates from events
+/// already in flight while a detached worker holds the watcher's last
+/// reference, and until the worker finishes initialization `watch_roots`
+/// is an optimistic seed holding the *requested* roots, which the worker
+/// then replaces with the ones actually watched. Release the state lock
+/// before dropping the watcher; `Drop` needs that lock to retire the
+/// metadata.
 pub struct HotFileWatcher {
     pub state: Arc<Mutex<HotFileState>>,
     _watcher: Arc<Mutex<Option<notify::RecommendedWatcher>>>,
     stop: Arc<AtomicBool>,
-    #[cfg(test)]
-    ready: Arc<AtomicBool>,
+    /// Serializes every write that decides what the state claims: `Drop`'s
+    /// cancellation and state retirement, `install`'s success and
+    /// initialization-error publications, and the worker's takeover of the
+    /// watcher. Held only across atomic loads/stores and brief state
+    /// writes — never across installs, walks or joins.
+    stop_gate: Arc<Mutex<()>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
+/// Test-only hook run by [`HotFileWatcher::start_background_inner`] after
+/// each root has been handled, while the watcher is still alive.
+type RootHook = Box<dyn FnMut(&Path) + Send + 'static>;
+
 impl HotFileWatcher {
-    /// Begin watching on a background thread and return immediately.
+    /// A watcher for an empty root list: no worker, no OS watcher, and the
+    /// same empty state a synchronous install would have published.
+    /// Asking for nothing must not cost an inotify instance (or FSEvents
+    /// stream) that would only be dropped again unused.
+    fn idle() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HotFileState::default())),
+            _watcher: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+            stop_gate: Arc::new(Mutex::new(())),
+            handle: None,
+        }
+    }
+
+    /// Install every watch before returning — the original entry point,
+    /// kept for callers that need `watch_roots` / `error` to already be
+    /// final. The TUI startup path uses [`Self::start_background`].
     ///
-    /// The shared `state` is populated as the watches are installed, so the
-    /// UI can render without waiting for a large tree to be walked. Used by
-    /// the TUI startup path, where blocking on tens of thousands of
-    /// directories would stall the first frame.
-    pub fn start_background(roots: &[&Path]) -> Self {
+    /// With no roots there is nothing to install, so this returns
+    /// [`Self::idle`] without creating an OS watcher.
+    pub fn start(roots: &[&Path]) -> Self {
+        if roots.is_empty() {
+            return Self::idle();
+        }
         let roots: Vec<PathBuf> = roots.iter().map(|p| p.to_path_buf()).collect();
         let state = Arc::new(Mutex::new(HotFileState::default()));
-        // Optimistic: the roots we were asked for, until the thread reports
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_gate = Arc::new(Mutex::new(()));
+        let watcher = install(&roots, &state, &stop, &stop_gate, None);
+        Self {
+            state,
+            _watcher: Arc::new(Mutex::new(watcher)),
+            stop,
+            stop_gate,
+            handle: None,
+        }
+    }
+
+    /// Begin watching on a background thread and return immediately.
+    ///
+    /// Nothing waits on the install: the requested roots are seeded into
+    /// `watch_roots` at once as an optimistic guess, and the worker
+    /// replaces them with the roots it actually watches when it finishes.
+    /// See [`HotFileWatcher`] for what a cancellation does to that seed.
+    /// Blocking the first frame on a recursive walk of a large tree is the
+    /// stall this exists to remove.
+    ///
+    /// With no roots there is nothing to watch; like [`Self::start`], this
+    /// returns [`Self::idle`] without spawning a worker or creating the OS
+    /// watcher `install` would only drop again unused.
+    pub fn start_background(roots: &[&Path]) -> Self {
+        // No roots is nothing to watch: fall through to the synchronous
+        // path, which returns the same empty watcher without a worker.
+        if roots.is_empty() {
+            return Self::start(roots);
+        }
+        Self::start_background_inner(roots, || (), || (), None)
+    }
+
+    /// The body of the background constructor. `before_install` runs on the
+    /// worker before any watch work, `on_root` after each root while the
+    /// watcher is still alive, and `after_install` between `install`
+    /// publishing its result and the ownership decision below. Whatever
+    /// `before_install` / `after_install` return is held until the worker
+    /// exits — tests use them to park the worker at a known point and to
+    /// observe termination. Production passes no-ops and no hook.
+    fn start_background_inner<F, G, H, I>(
+        roots: &[&Path],
+        before_install: F,
+        after_install: H,
+        mut on_root: Option<RootHook>,
+    ) -> Self
+    where
+        F: FnOnce() -> G + Send + 'static,
+        G: Send + 'static,
+        H: FnOnce() -> I + Send + 'static,
+        I: Send + 'static,
+    {
+        let roots: Vec<PathBuf> = roots.iter().map(|p| p.to_path_buf()).collect();
+        let state = Arc::new(Mutex::new(HotFileState::default()));
+        // Optimistic: the roots we were asked for, until the worker reports
         // which ones actually took. Keeps the banner useful in the meantime.
         {
             let mut s = state.lock().unwrap();
@@ -168,49 +260,71 @@ impl HotFileWatcher {
         }
         let watcher = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
-        #[cfg(test)]
-        let ready = Arc::new(AtomicBool::new(false));
+        let stop_gate = Arc::new(Mutex::new(()));
 
         let state_t = state.clone();
         let watcher_t = watcher.clone();
         let stop_t = stop.clone();
-        #[cfg(test)]
-        let ready_t = ready.clone();
+        let stop_gate_t = stop_gate.clone();
         let roots_t = roots.clone();
-        let handle = thread::spawn(move || {
-            if let Some(w) = install(&roots_t, &state_t, &stop_t) {
-                if !stop_t.load(Ordering::Relaxed) {
-                    *watcher_t.lock().unwrap() = Some(w);
+        let spawned = thread::Builder::new()
+            .name("hot-files-watch".into())
+            .spawn(move || {
+                let _before = before_install();
+                let hook: Option<&mut dyn FnMut(&Path)> = match on_root.as_mut() {
+                    Some(hook) => Some(&mut **hook),
+                    None => None,
+                };
+                let installed = install(&roots_t, &state_t, &stop_t, &stop_gate_t, hook);
+                let _after = after_install();
+                // Ownership transfer, serialized with `Drop` under the
+                // gate. A cancellation visible here wins and the watcher is
+                // dropped unowned; there is no third outcome. Publication
+                // takes the same gate, so it can neither slip past a `Drop`
+                // that already retired the state nor leave metadata behind
+                // when this decision refuses the watcher.
+                if let Some(w) = installed {
+                    let _gate = stop_gate_t.lock().unwrap();
+                    if !stop_t.load(Ordering::Relaxed) {
+                        *watcher_t.lock().unwrap() = Some(w);
+                    }
                 }
+            });
+        let handle = match spawned {
+            Ok(handle) => Some(handle),
+            // No thread means no install. Report it through the same error
+            // slot the tab already reads instead of panicking the TUI.
+            Err(e) => {
+                let mut s = state.lock().unwrap();
+                s.watch_roots.clear();
+                s.error = Some(format!("watcher thread failed to start: {}", e));
+                None
             }
-            #[cfg(test)]
-            ready_t.store(true, Ordering::Relaxed);
-            // Stay alive (and keep the watcher alive) until dropped.
-            while !stop_t.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(50));
-            }
-        });
-
+        };
         Self {
             state,
             _watcher: watcher,
             stop,
-            #[cfg(test)]
-            ready,
-            handle: Some(handle),
+            stop_gate,
+            handle,
         }
     }
 
-    /// Block until the background installation has finished (or failed).
-    /// Useful for tests and for callers that need `watch_roots` / `error`
-    /// to be final.
+    /// Block until the background worker has exited, which is the point at
+    /// which `watch_roots` and `error` are final. Test-only: production
+    /// never needs to wait for installation.
+    ///
+    /// Calling it more than once is harmless, and it returns at once for a
+    /// watcher with no worker — [`Self::start`] and [`Self::idle`]. If the
+    /// worker panicked, this returns when the thread is done rather than
+    /// waiting forever, and `state` holds whatever the worker managed to
+    /// publish.
     #[cfg(test)]
     pub fn wait(&self) {
         if let Some(handle) = &self.handle {
-            while !self.ready.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(10));
+            while !handle.is_finished() {
+                thread::sleep(Duration::from_millis(1));
             }
-            let _ = handle;
         }
     }
 
@@ -297,9 +411,33 @@ impl HotFileWatcher {
 
 impl Drop for HotFileWatcher {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        // Cancel and retire under the gate. `install` checks `stop` before
+        // each root and between directories of the readable-tree fallback;
+        // its final publications and the worker's ownership decision take
+        // this same gate. One critical section, then there is no
+        // publication left to land: one that already happened is cleared
+        // here, and one that has not yet takes the gate and finds the
+        // cancellation. The state lock is held only across the few field
+        // writes below; callers must not hold it around this drop.
+        {
+            let _gate = self.stop_gate.lock().unwrap();
+            self.stop.store(true, Ordering::Relaxed);
+            let mut s = self.state.lock().unwrap();
+            s.watch_roots.clear();
+            s.error = None;
+        }
+        // Join only a worker that has already finished. One still inside
+        // `notify`'s recursive walk cannot be interrupted from here — the
+        // walk is synchronous and `notify` exposes no cancellation — and on
+        // a large tree it can take seconds to tens of seconds. Blocking
+        // shutdown on that would put back the stall this change removes.
+        // The detached worker observes `stop` at its next check, drops any
+        // watcher it built, and exits; the watcher lives behind an `Arc`, so
+        // the last owner out releases the OS watches.
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -397,11 +535,37 @@ pub fn attribute_to_pools(
 /// Install watches for `roots` into `state`, returning the watcher when
 /// successful. Shared by the synchronous and background entry points so the
 /// two cannot drift apart.
+///
+/// `on_root`, when given, runs after each root has been handled and while
+/// the watcher is still alive. Tests use it to observe and cancel a
+/// partially completed install; production passes `None`.
+///
+/// Cancellation is checked before each root and between directories of the
+/// readable-tree fallback; those checks only abort, they publish nothing.
+/// A cancelled call returns `None` and drops the watcher it was building,
+/// which releases any watches already installed.
+///
+/// Both final publications — success metadata and the initialization error
+/// — are serialized with cancellation under `stop_gate`, the same gate
+/// `Drop` takes to cancel and retire the state. A `Drop` that already
+/// retired the state cannot be followed by a publication (the recheck
+/// inside the gate sees the stop), and a publication that landed before
+/// `Drop` is retired by it. Once `Drop` returns, `watch_roots` and `error`
+/// are final; the rest of the state is not frozen by the drop (see
+/// [`HotFileWatcher`]). The gate is held only across the state writes
+/// themselves — never across the walk or `notify` calls.
 fn install(
     roots: &[PathBuf],
     state: &Arc<Mutex<HotFileState>>,
     stop: &AtomicBool,
+    stop_gate: &Mutex<()>,
+    mut on_root: Option<&mut dyn FnMut(&Path)>,
 ) -> Option<notify::RecommendedWatcher> {
+    // Dropped before the worker got here, or cancelled outright: nothing to
+    // build, and building the OS watcher would only have to be torn down.
+    if stop.load(Ordering::Relaxed) {
+        return None;
+    }
     let state_w = state.clone();
     let watcher_result =
         notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -418,7 +582,19 @@ fn install(
     let mut watcher = match watcher_result {
         Ok(w) => w,
         Err(e) => {
-            state.lock().unwrap().error = Some(format!("watcher init failed: {}", e));
+            // Serialized with `Drop`: if cancellation won, publish nothing
+            // — `Drop` retires whatever the state held, and a fresh error
+            // for an install nobody owns must not appear after it.
+            let _gate = stop_gate.lock().unwrap();
+            if !stop.load(Ordering::Relaxed) {
+                let mut s = state.lock().unwrap();
+                // The background path seeds `watch_roots` optimistically
+                // before the worker runs. A watcher that never came up is
+                // not watching them, so drop that claim rather than leaving
+                // a stale one.
+                s.watch_roots.clear();
+                s.error = Some(format!("watcher init failed: {}", e));
+            }
             return None;
         }
     };
@@ -459,16 +635,24 @@ fn install(
             }
             Err(e) => errors.push(describe_watch_error(r, &e)),
         }
+        if let Some(hook) = on_root.as_deref_mut() {
+            hook(r.as_path());
+        }
     }
-    if !stop.load(Ordering::Relaxed) {
-        let mut s = state.lock().unwrap();
-        // Report the roots we are actually watching, not the ones we
-        // were asked to: the tab draws this as "watch <paths>", and
-        // listing a path no event will ever come from reads as a bug
-        // in the watcher rather than a bad line in a config file.
-        s.watch_roots = watched;
-        if !errors.is_empty() {
-            s.error = Some(errors.join("; "));
+    {
+        // The stop recheck and the publication share one critical section,
+        // so no `Drop` can retire the state between them.
+        let _gate = stop_gate.lock().unwrap();
+        if !stop.load(Ordering::Relaxed) {
+            let mut s = state.lock().unwrap();
+            // Report the roots we are actually watching, not the ones we
+            // were asked to: the tab draws this as "watch <paths>", and
+            // listing a path no event will ever come from reads as a bug
+            // in the watcher rather than a bad line in a config file.
+            s.watch_roots = watched;
+            if !errors.is_empty() {
+                s.error = Some(errors.join("; "));
+            }
         }
     }
 
@@ -639,9 +823,9 @@ pub fn prune_nested_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
     result
 }
 
-/// The roots to hand [`HotFileWatcher::start`], given what the user asked
-/// for. `replace` (from `--watch` or the config's `watch_paths`) stands in
-/// for [`default_roots`] entirely; `extra` (from `--watch-add` or
+/// The roots to hand [`HotFileWatcher::start_background`], given what the
+/// user asked for. `replace` (from `--watch` or the config's `watch_paths`)
+/// stands in for [`default_roots`] entirely; `extra` (from `--watch-add` or
 /// `extra_watch_paths`) is added to whichever list won.
 ///
 /// Duplicates and nested descendant paths are dropped. Watching the same tree
@@ -802,6 +986,563 @@ mod tests {
         let err = err.expect("the skipped directory should be reported");
         assert!(err.contains("locked"), "{err}");
         assert!(!err.contains("fails the whole root"), "{err}");
+    }
+
+    /// The point of the background constructor: it must not wait for the
+    /// install. The worker is parked at a gate before it can touch the
+    /// filesystem, and the gate is released only after the constructor has
+    /// returned; if the constructor had waited for the worker, the gate
+    /// timeout would expire and the flag below would fail the test instead
+    /// of hanging the suite.
+    #[test]
+    fn background_startup_returns_before_installation_runs() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let released_by_test = Arc::new(AtomicBool::new(false));
+        let released_w = released_by_test.clone();
+        let w = HotFileWatcher::start_background_inner(
+            &[dir.as_path()],
+            move || {
+                let released = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                released_w.store(released, Ordering::SeqCst);
+            },
+            || (),
+            None,
+        );
+
+        // Reaching this line with the worker still parked is the guarantee;
+        // the flag only distinguishes that from a constructor that waited
+        // and let the timeout expire.
+        let _ = release_tx.send(());
+        w.wait();
+        assert!(
+            released_by_test.load(Ordering::SeqCst),
+            "start_background returned only after installation had run"
+        );
+        let (_, roots, err) = w.snapshot_meta();
+        assert_eq!(roots, vec![dir.clone()]);
+        assert!(err.is_none(), "{err:?}");
+    }
+
+    /// `wait()` is the deterministic completion signal for tests: it is
+    /// repeatable, and once it returns the published roots and error are
+    /// final.
+    #[test]
+    fn wait_is_repeatable_and_reports_the_final_state() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+        let missing = dir.join("diskwatch-wait-missing");
+
+        let w = HotFileWatcher::start_background(&[dir.as_path(), missing.as_path()]);
+        w.wait();
+        let first = w.snapshot_meta();
+        w.wait();
+        let second = w.snapshot_meta();
+        assert_eq!(first, second, "repeated wait() must not change the result");
+        assert_eq!(second.1, vec![dir.clone()]);
+        assert!(second
+            .2
+            .as_deref()
+            .is_some_and(|e| e.contains("no such path")));
+    }
+
+    /// The synchronous entry point keeps its old contract: installation is
+    /// finished by the time it returns, with no `wait()` required.
+    #[test]
+    fn synchronous_start_finishes_installation_before_returning() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-sync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+        let missing = dir.join("diskwatch-sync-missing");
+
+        let w = HotFileWatcher::start(&[dir.as_path(), missing.as_path()]);
+        let (_, roots, err) = w.snapshot_meta();
+        assert_eq!(roots, vec![dir.clone()]);
+        assert!(err
+            .expect("missing root reported")
+            .contains("diskwatch-sync-missing"));
+    }
+
+    /// Watching nothing is still a successful install: no roots, no error,
+    /// through either entry point — and no OS watcher is built only to be
+    /// dropped again unused.
+    #[test]
+    fn empty_roots_finish_with_no_error() {
+        for w in [
+            HotFileWatcher::start_background(&[]),
+            HotFileWatcher::start(&[]),
+        ] {
+            w.wait();
+            assert!(
+                w._watcher.lock().unwrap().is_none(),
+                "nothing to watch must not build an OS watcher"
+            );
+            let (events, roots, err) = w.snapshot_meta();
+            assert_eq!(events, 0);
+            assert!(roots.is_empty());
+            assert!(err.is_none(), "{err:?}");
+        }
+    }
+
+    /// A cancelled install must not watch anything and must not publish
+    /// either: the state keeps no roots and no error for work that was
+    /// abandoned, and the watcher it built is dropped.
+    #[test]
+    fn a_cancelled_install_installs_and_publishes_nothing() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        let state = Arc::new(Mutex::new(HotFileState::default()));
+        let stop = AtomicBool::new(true);
+        let stop_gate = Mutex::new(());
+        let w = install(std::slice::from_ref(&dir), &state, &stop, &stop_gate, None);
+        assert!(w.is_none(), "a cancelled install must not return a watcher");
+        let s = state.lock().unwrap();
+        assert!(s.watch_roots.is_empty());
+        assert!(s.error.is_none());
+    }
+
+    /// The `(device, inode)` pair for `path`, in the same representation as
+    /// the watch pairs below.
+    #[cfg(target_os = "linux")]
+    fn file_key(path: &Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).expect("metadata");
+        (metadata.dev(), metadata.ino())
+    }
+
+    /// `(device, inode)` pairs for every live inotify watch in this process,
+    /// read from `/proc/self/fdinfo`. Matching on the pair rather than the
+    /// inode alone keeps a watch on some other filesystem with a colliding
+    /// inode number from passing for the one under test. `None` when
+    /// `/proc` is not there to read.
+    #[cfg(target_os = "linux")]
+    fn inotify_watched_files() -> Option<std::collections::HashSet<(u64, u64)>> {
+        let mut files = std::collections::HashSet::new();
+        for entry in std::fs::read_dir("/proc/self/fdinfo").ok()?.flatten() {
+            let Ok(info) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for line in info.lines() {
+                // Watch lines look like
+                // `inotify wd:1 ino:9e7e sdev:800013 mask:...`; the fdinfo
+                // header's own `ino:` line does not start with `inotify`.
+                let mut fields = line.split_whitespace();
+                if fields.next() != Some("inotify") {
+                    continue;
+                }
+                let (mut sdev, mut ino) = (None, None);
+                for field in fields {
+                    if let Some(hex) = field.strip_prefix("sdev:") {
+                        sdev = u64::from_str_radix(hex, 16).ok();
+                    } else if let Some(hex) = field.strip_prefix("ino:") {
+                        ino = u64::from_str_radix(hex, 16).ok();
+                    }
+                }
+                if let (Some(sdev), Some(ino)) = (sdev, ino) {
+                    files.insert((new_encode_dev(sdev), ino));
+                }
+            }
+        }
+        Some(files)
+    }
+
+    /// `/proc/self/fdinfo` prints `sdev` as the kernel's raw `dev_t`, while
+    /// `Metadata::dev` is its `new_encode_dev` user representation (see
+    /// `include/linux/kdev_t.h`), so the two differ wherever the minor or
+    /// major numbers are large. Normalizing here lets the tests compare
+    /// fdinfo watches against `std::fs::metadata` directly.
+    #[cfg(target_os = "linux")]
+    fn new_encode_dev(dev: u64) -> u64 {
+        let major = (dev >> 20) & 0xfff;
+        let minor = dev & 0xfffff;
+        ((minor & 0xff) | (major << 8) | ((minor & 0xfffff00) << 12)) & 0xffff_ffff
+    }
+
+    /// Wait until `key` has no live inotify watch. `notify`'s `Drop` hands
+    /// the inotify fd to its event-loop thread, so the kernel-side release
+    /// lands shortly after the watcher drops; wait for that observable
+    /// state instead of assuming it is instantaneous. A real deadline
+    /// bounds total time, scanning `/proc` included, and only limits
+    /// failure detection — it decides no outcome here.
+    #[cfg(target_os = "linux")]
+    fn wait_for_watch_release(key: (u64, u64)) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match inotify_watched_files() {
+                Some(w) if !w.contains(&key) => return true,
+                Some(_) if Instant::now() >= deadline => return false,
+                Some(_) => thread::sleep(Duration::from_millis(1)),
+                None => return false,
+            }
+        }
+    }
+
+    /// Cancellation arriving *after* part of the install is already on
+    /// disk must take those watches down with it: `install` drops the
+    /// half-built watcher, and the kernel frees every watch when its
+    /// inotify instance closes. The hook cancels between the two roots —
+    /// with the first already watched and the second untouched — so
+    /// neither "cancelled before any work" nor timing luck can pass this.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cancelled_install_releases_the_watches_it_already_made() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-partial-{}", std::process::id()));
+        let first = dir.join("first");
+        let second = dir.join("second");
+        std::fs::create_dir_all(&first).expect("first dir");
+        std::fs::create_dir_all(&second).expect("second dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        // No fdinfo to read: the kernel half of the guarantee is not
+        // observable here. The structural half is still pinned by
+        // `a_cancelled_install_installs_and_publishes_nothing`.
+        let Some(before) = inotify_watched_files() else {
+            return;
+        };
+        let first_key = file_key(&first);
+        assert!(
+            !before.contains(&first_key),
+            "the test directory is already watched"
+        );
+
+        let state = Arc::new(Mutex::new(HotFileState::default()));
+        let stop = AtomicBool::new(false);
+        let stop_gate = Mutex::new(());
+        let mut roots_seen = 0;
+        let mut watched_at_cancel = None;
+        let mut on_root = |root: &Path| {
+            roots_seen += 1;
+            // `watch()` is request/reply with `notify`'s event loop, so by
+            // now the first root's kernel watch is live: cancelling here
+            // is genuinely mid-install, not before it started.
+            watched_at_cancel = inotify_watched_files().map(|w| w.contains(&file_key(root)));
+            stop.store(true, Ordering::Relaxed);
+        };
+        let watcher = install(
+            &[first.clone(), second.clone()],
+            &state,
+            &stop,
+            &stop_gate,
+            Some(&mut on_root),
+        );
+
+        assert!(watcher.is_none(), "a cancelled install must return nothing");
+        assert_eq!(
+            roots_seen, 1,
+            "the cancelled install must not touch the second root"
+        );
+        assert_eq!(
+            watched_at_cancel,
+            Some(true),
+            "the first root was watched when the cancellation arrived"
+        );
+        assert!(
+            wait_for_watch_release(first_key),
+            "the partial watch must be released with the cancelled install"
+        );
+        let s = state.lock().unwrap();
+        assert!(
+            s.watch_roots.is_empty(),
+            "a cancelled install publishes nothing"
+        );
+        assert!(s.error.is_none(), "{:?}", s.error);
+    }
+
+    /// The fallback walk checks cancellation before each directory, so a
+    /// cancelled walk must not even read the root. Without cancellation the
+    /// same call reports the unreadable root, which keeps the assertion
+    /// from being vacuous.
+    #[test]
+    fn a_cancelled_walk_leaves_the_tree_alone() {
+        let missing = PathBuf::from("/diskwatch-cancelled-walk-does-not-exist");
+        let mut watcher =
+            notify::recommended_watcher(|_: notify::Result<notify::Event>| {}).unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        assert!(watch_readable_tree(&mut watcher, &missing, &cancelled).is_empty());
+
+        let running = AtomicBool::new(false);
+        assert_eq!(
+            watch_readable_tree(&mut watcher, &missing, &running),
+            vec![missing]
+        );
+    }
+
+    /// Cancellation while initialization is still ahead of the watcher:
+    /// dropping it must request cancellation, return without waiting out the
+    /// install, and the worker must terminate instead of installing the
+    /// requested roots. The gate parks the worker before `install` runs, so
+    /// the drop provably lands before any watch is installed; dropping the
+    /// guard signals the worker's exit.
+    #[test]
+    fn dropping_a_watcher_during_initialization_cancels_the_worker() {
+        struct ExitSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for ExitSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("diskwatch-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+        let missing = dir.join("diskwatch-drop-missing");
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<()>();
+        let w = HotFileWatcher::start_background_inner(
+            &[dir.as_path(), missing.as_path()],
+            move || {
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                ExitSignal(exit_tx)
+            },
+            || (),
+            None,
+        );
+        let state = w.state.clone();
+        drop(w);
+        // Drop must not wait out the install: the worker is still parked in
+        // the gate, so its exit signal cannot have arrived yet.
+        assert!(
+            exit_rx.try_recv().is_err(),
+            "Drop waited for the in-flight installation"
+        );
+        let _ = release_tx.send(());
+        exit_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker must terminate after Drop requests cancellation");
+
+        // Cancellation landed before the first watch, and Drop retired the
+        // optimistic roots on its way out: after Drop returns the state
+        // claims nothing. A completed install would have dropped the
+        // missing root and reported it instead.
+        let s = state.lock().unwrap();
+        assert!(s.watch_roots.is_empty(), "{:?}", s.watch_roots);
+        assert!(s.error.is_none(), "{:?}", s.error);
+    }
+
+    /// The gap between `install` publishing its result and the worker taking
+    /// ownership of the watcher is load-bearing: a `Drop` landing in it must
+    /// retire the published roots immediately — nothing may claim a watcher
+    /// no one owns, not even transiently. The `after_install` seam parks the
+    /// worker in exactly that gap until the test has dropped the watcher.
+    #[test]
+    fn a_cancelled_transfer_rolls_back_the_published_roots() {
+        struct ExitSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for ExitSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("diskwatch-rollback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel::<()>();
+        let w = HotFileWatcher::start_background_inner(
+            &[dir.as_path()],
+            || (),
+            move || {
+                reached_tx.send(()).expect("signal the transfer point");
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                ExitSignal(exit_tx)
+            },
+            None,
+        );
+        let state = w.state.clone();
+        let watcher_slot = w._watcher.clone();
+
+        // Parked between publication and ownership: the installed roots are
+        // already visible, the watcher is not stored yet.
+        reached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker must reach the transfer point");
+        assert_eq!(state.lock().unwrap().watch_roots, vec![dir.clone()]);
+        assert!(watcher_slot.lock().unwrap().is_none());
+
+        // Cancellation lands in the gap: Drop must request it, retire the
+        // publication, and return without waiting for the parked worker.
+        drop(w);
+        assert!(exit_rx.try_recv().is_err(), "Drop waited out the transfer");
+        {
+            let s = state.lock().unwrap();
+            assert!(
+                s.watch_roots.is_empty(),
+                "a publication that landed before Drop must be retired by it"
+            );
+            assert!(s.error.is_none(), "{:?}", s.error);
+        }
+
+        let _ = release_tx.send(());
+        exit_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker must terminate after the cancellation");
+
+        // Cancellation also wins the ownership decision: nothing stores the
+        // watcher, and the state stays retired.
+        assert!(
+            watcher_slot.lock().unwrap().is_none(),
+            "a cancelled transfer must not store the watcher"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            wait_for_watch_release(file_key(&dir)),
+            "the abandoned watcher must release its watch"
+        );
+        let s = state.lock().unwrap();
+        assert!(s.watch_roots.is_empty(), "{:?}", s.watch_roots);
+        assert!(s.error.is_none(), "{:?}", s.error);
+    }
+
+    /// The state-mutex interleaving: a publication that has passed its
+    /// cancellation check can still be waiting on the state lock when
+    /// `Drop` runs. Without the publication half of the gate that write
+    /// can land after `Drop` retired the metadata; with it, the write
+    /// either happens before `Drop` (which retires it) or waits behind the
+    /// gate and finds the cancellation.
+    ///
+    /// Every round forces the rendezvous: an outside thread holds the state
+    /// lock, the worker is parked after its last root, the worker is
+    /// released *before* `Drop` starts — biasing, not guaranteeing, that
+    /// its check runs while the cancellation is still unpublished — and
+    /// `Drop` then runs on its own thread. Channels announce every step;
+    /// no sleeps.
+    ///
+    /// Honest scope. The retirement half of the contract is deterministic
+    /// here: a `Drop` that does not retire, or a publication that slips
+    /// past a retired state, fails whichever round it happens in. The exact
+    /// gate-less window is *not* deterministic: the un-gated check and the
+    /// state write are adjacent instructions with no seam a test can park
+    /// on, and the final write-vs-retire order is a mutex wake race whose
+    /// odds drift with scheduling — repetition is the only lever. Measured
+    /// against a deliberately gate-less build: at 64 rounds 4/170 runs
+    /// still passed; at 256 rounds 600/600 runs failed. A green run is
+    /// therefore strong evidence, not proof, that the publication is
+    /// gated: this is a stress detector for that window, not deterministic
+    /// coverage of it.
+    #[test]
+    fn a_publication_racing_drop_leaves_no_stale_state() {
+        struct ExitSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for ExitSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        // Repetition is the only lever on the wake race above; see the
+        // scope note in this test's docs for what the loop does and does
+        // not prove.
+        const ROUNDS: usize = 256;
+
+        let dir = std::env::temp_dir().join(format!("diskwatch-racelock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let _guard = TempDirGuard(dir.clone());
+
+        for round in 0..ROUNDS {
+            let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let (exit_tx, exit_rx) = std::sync::mpsc::channel::<()>();
+            let w = HotFileWatcher::start_background_inner(
+                &[dir.as_path()],
+                || (),
+                move || ExitSignal(exit_tx),
+                Some(Box::new(move |_root: &Path| {
+                    reached_tx.send(()).expect("signal the last root");
+                    let _ = go_rx.recv_timeout(Duration::from_secs(5));
+                })),
+            );
+            let state = w.state.clone();
+
+            // Hold the state lock from an outside thread: the worker's
+            // publication cannot finish until this thread lets go.
+            let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+            let (let_go_tx, let_go_rx) = std::sync::mpsc::channel::<()>();
+            let state_holder = state.clone();
+            let holder = thread::spawn(move || {
+                let _guard = state_holder.lock().unwrap();
+                held_tx.send(()).expect("signal the held lock");
+                let _ = let_go_rx.recv_timeout(Duration::from_secs(5));
+            });
+            held_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the holder must take the state lock");
+
+            // The worker is now parked after its root, with the watch
+            // already installed: the publication is the next thing it will
+            // attempt. The setup repeats identically every round, so
+            // checking that the watch is live once keeps the loop cheap
+            // and the test honest about watching a real root.
+            reached_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the worker must reach the last root");
+            if round == 0 {
+                #[cfg(target_os = "linux")]
+                if let Some(seen) = inotify_watched_files() {
+                    assert!(
+                        seen.contains(&file_key(&dir)),
+                        "the root must be watched before the race starts"
+                    );
+                }
+            }
+
+            // Release the worker before creating the dropper. This biases
+            // scheduling toward letting the worker reach its publication
+            // path while cancellation is still unpublished, but does not
+            // guarantee that ordering. The race remains a probabilistic
+            // stress detector; see the scope note above.
+            // The dropper then owns `w`.
+            let (dropped_tx, dropped_rx) = std::sync::mpsc::channel::<()>();
+            let _ = go_tx.send(());
+            let dropper = thread::spawn(move || {
+                drop(w);
+                let _ = dropped_tx.send(());
+            });
+            let _ = let_go_tx.send(());
+
+            dropped_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Drop must return without waiting out the install");
+            holder.join().expect("holder thread");
+            dropper.join().expect("dropper thread");
+
+            // Strict contract: once Drop has returned, no publication —
+            // past or future — can claim watched roots or an error.
+            {
+                let s = state.lock().unwrap();
+                assert!(
+                    s.watch_roots.is_empty(),
+                    "round {round}: roots after Drop: {:?}",
+                    s.watch_roots
+                );
+                assert!(s.error.is_none(), "round {round}: error {:?}", s.error);
+            }
+            exit_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the worker must terminate after the cancellation");
+            #[cfg(target_os = "linux")]
+            assert!(
+                wait_for_watch_release(file_key(&dir)),
+                "round {round}: the abandoned watcher must release its watch"
+            );
+            {
+                let s = state.lock().unwrap();
+                assert!(
+                    s.watch_roots.is_empty(),
+                    "round {round}: roots after the worker exited: {:?}",
+                    s.watch_roots
+                );
+                assert!(s.error.is_none(), "round {round}: error {:?}", s.error);
+            }
+        }
     }
 
     fn mount(dev: &str, at: &str, ty: &str) -> crate::collect::FsTick {

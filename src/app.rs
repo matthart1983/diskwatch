@@ -74,9 +74,11 @@ pub struct Options {
 
 impl Options {
     /// Every setting at its built-in default, opening on `start_tab` in
-    /// `view`. Only the tests build an `Options` this way — main.rs always
-    /// has resolved values for every field, and going through here would
-    /// mean computing defaults it is about to overwrite.
+    /// `view`, except `watch_roots`: those stay empty so tests never install
+    /// watches on the real filesystem. Only the tests build an `Options`
+    /// this way — main.rs always has resolved values for every field, and
+    /// going through here would mean computing defaults it is about to
+    /// overwrite.
     #[cfg(test)]
     pub fn new(start_tab: TabId, view: ViewMode) -> Self {
         Self {
