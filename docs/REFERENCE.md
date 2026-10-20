@@ -135,7 +135,7 @@ Rust 1.75+.
 | `s` | Cycle file sort (Dense) |
 | `f` / `F` | Volumes: filter by kind (all, apfs, mdraid, zfs, lvm), skipping kinds not present |
 | `p` | Pause / resume |
-| `,` | Settings — columns, temperature unit, SMART interval, theme, view |
+| `,` | Settings — columns, temperature unit, SMART interval, theme, view. `S` saves them |
 | `r` | Force a SMART refresh |
 | `?` | Help |
 | `q` / `Esc` | Quit |
@@ -169,7 +169,7 @@ Those pin real RGB, which is what `--graph-fade` needs to fade through — a 16-
 palette has no intermediate shades, so the gradient does nothing under the default.
 
 Theme and graph style are also live in the settings overlay. Changes there last for the
-session; the config file below is what makes one stick.
+session unless you press `S`, which saves them to the config file below.
 
 ## Config
 
@@ -183,6 +183,12 @@ writes a commented file listing every setting at its default, to
 `$XDG_CONFIG_HOME/diskwatch/config.toml` (`~/.config/diskwatch/config.toml` if that's
 unset — macOS included). `$DISKWATCH_CONFIG` or `--config PATH` points elsewhere;
 `--no-config` ignores it entirely.
+
+`S` in the settings overlay (`,`) saves what the overlay shows (theme, graph style and
+fade, view, SMART interval, refresh speed, temperature unit and columns) into the file the
+settings came from, or the default location if there wasn't one, creating it from the
+commented default. It updates those keys in place. Comments, watch paths, ignores and
+anything else you wrote are left as they are.
 
 ```toml
 theme = "nord"

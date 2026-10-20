@@ -302,6 +302,9 @@ pub struct App {
     pub config_source: Option<PathBuf>,
     /// Problems found reading it. Surfaced in the settings overlay.
     pub config_warnings: Vec<String>,
+    /// Outcome of the last `S` in the settings overlay, and when. Shown in
+    /// its footer for [`SETTINGS_STATUS_SECS`].
+    pub settings_status: Option<(String, Instant)>,
 }
 
 #[cfg(test)]
@@ -369,6 +372,7 @@ impl App {
             smart_refresh_requested: false,
             should_quit: false,
             config_source: opts.config_source,
+            settings_status: None,
             config_warnings: opts.config_warnings,
         }
     }
@@ -926,8 +930,52 @@ const SETTINGS_ROWS: usize = 12;
 // at or above, rows are cycle setters (temp unit, SMART interval, theme).
 const SETTINGS_FIRST_CYCLE: usize = 5;
 
+/// How long "Saved to …" stays in the settings footer.
+const SETTINGS_STATUS_SECS: u64 = 5;
+
+/// Where `S` writes: the file the settings came from, else the default
+/// location.
+fn settings_save_path(app: &App) -> Option<PathBuf> {
+    app.config_source
+        .clone()
+        .or_else(crate::config::config_path)
+}
+
+/// `S` in the settings overlay: write what the overlay shows into the
+/// config file, as netwatch does.
+fn save_settings(app: &mut App) {
+    let Some(path) = settings_save_path(app) else {
+        app.settings_status = Some((
+            "\u{2717} Save failed: no config location (set DISKWATCH_CONFIG)".into(),
+            Instant::now(),
+        ));
+        return;
+    };
+    let values = crate::config::OverlaySettings {
+        theme: crate::ui::theme::name(),
+        graph: crate::ui::graph::name(),
+        graph_fade: crate::ui::graph::fade_enabled(),
+        view: app.view,
+        smart_interval_secs: app.smart_interval_secs,
+        refresh_interval_ms: app.refresh_interval_ms,
+        temp_unit: app.temp_unit,
+        columns: app.visible_columns,
+    }
+    .values();
+    let status = match crate::config::save_values(&path, &values) {
+        Ok(()) => {
+            let msg = format!("\u{2713} Saved to {}", tilde(&path));
+            app.config_source = Some(path);
+            msg
+        }
+        Err(e) => format!("\u{2717} Save failed: {e}"),
+    };
+    app.settings_status = Some((status, Instant::now()));
+}
+
 fn handle_settings_key(app: &mut App, key: KeyCode) {
     match key {
+        KeyCode::Char('S') => save_settings(app),
         KeyCode::Esc | KeyCode::Char(',') | KeyCode::Char('q') => {
             app.show_settings = false;
         }
@@ -1526,11 +1574,15 @@ pub fn tilde(path: &std::path::Path) -> String {
 /// these? — and report a config file it couldn't fully read, which is
 /// otherwise only visible in stderr the alternate screen has covered.
 fn settings_footer(app: &App) -> Vec<String> {
-    let mut out = vec!["  (changes last for this session only)".to_string()];
-    match &app.config_source {
-        Some(path) => out.push(format!("  persist them in {}", tilde(path))),
-        None => out.push("  `diskwatch --write-config` starts a config file".to_string()),
-    }
+    let fresh = app
+        .settings_status
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < Duration::from_secs(SETTINGS_STATUS_SECS));
+    let mut out = vec![match (fresh, settings_save_path(app)) {
+        (Some((msg, _)), _) => format!("  {msg}"),
+        (None, Some(path)) => format!("  S saves to {}", tilde(&path)),
+        (None, None) => "  changes last for this session (no config location)".to_string(),
+    }];
     if !app.config_warnings.is_empty() {
         out.push(format!(
             "  config: {} problem(s) — `diskwatch --diag` lists them",
@@ -1585,7 +1637,7 @@ fn draw_settings_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "  Move: ↑ ↓   Toggle: Space / Enter   Close: Esc / , / q",
+        "  Move: ↑ ↓   Toggle: Space / Enter   Save: S   Close: Esc / , / q",
         Style::default().fg(p::dim()),
     )));
     lines.push(Line::from(""));
@@ -1843,16 +1895,16 @@ mod tests {
 
         let out = render(&app);
         assert!(
-            out.contains("--write-config"),
-            "with no config file the overlay should say how to start one"
+            out.contains("S saves to"),
+            "with no config file the overlay should say where S writes"
         );
 
         app.config_source = Some(std::path::PathBuf::from("/etc/diskwatch/config.toml"));
         app.config_warnings = vec!["line 3: unknown key \"colours\"".to_string()];
         let out = render(&app);
         assert!(
-            out.contains("/etc/diskwatch/config.toml"),
-            "the overlay should name the file settings persist in"
+            out.contains("S saves to /etc/diskwatch/config.toml"),
+            "S writes back to the file the settings came from"
         );
         assert!(
             out.contains("1 problem"),
@@ -2297,5 +2349,68 @@ mod tests {
         // We don't promise pretty output below the supported floor, only
         // that we don't panic.
         render_all_tabs(60, 20);
+    }
+
+    #[test]
+    fn s_in_settings_saves_what_the_overlay_shows() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-s-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# mine\nwatch_paths = [\"~/src\"]\ntemp_unit = \"celsius\"\n",
+        )
+        .unwrap();
+
+        let mut app = App::new_for_test(TabId::Overview, ViewMode::Full);
+        app.config_source = Some(path.clone());
+        super::handle_key(&mut app, KeyCode::Char(','));
+        assert!(app.show_settings);
+        app.temp_unit = TempUnit::Fahrenheit;
+        app.smart_interval_secs = 60;
+        app.visible_columns.toggle(VisibleColumns::FREE);
+        super::handle_key(&mut app, KeyCode::Char('S'));
+
+        let status = app
+            .settings_status
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .unwrap_or("");
+        assert!(status.starts_with("\u{2713} Saved to"), "{status}");
+        assert!(super::settings_footer(&app)[0].contains("Saved to"));
+        assert!(app.show_settings, "saving leaves the overlay open");
+
+        let cfg = crate::config::Config::load_from(&path);
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(cfg.temp_unit, Some(TempUnit::Fahrenheit));
+        assert_eq!(cfg.smart_interval_secs, Some(60));
+        assert!(!cfg.columns.unwrap().contains(VisibleColumns::FREE));
+        assert_eq!(
+            cfg.watch_paths.map(|p| p.len()),
+            Some(1),
+            "untouched keys stay"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_save_says_why() {
+        let mut app = App::new_for_test(TabId::Overview, ViewMode::Full);
+        // A directory where the file should be: the write can't succeed.
+        let dir = std::env::temp_dir().join(format!("diskwatch-sfail-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("config.toml")).unwrap();
+        app.config_source = Some(dir.join("config.toml"));
+        app.show_settings = true;
+        super::handle_key(&mut app, KeyCode::Char('S'));
+        let status = app
+            .settings_status
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .unwrap_or("");
+        assert!(status.starts_with("\u{2717} Save failed"), "{status}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

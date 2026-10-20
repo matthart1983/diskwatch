@@ -389,6 +389,109 @@ pub fn default_file_contents() -> String {
 }
 
 // ---------------------------------------------------------------------
+// Saving
+// ---------------------------------------------------------------------
+
+/// The settings the `,` overlay can change, as they stand.
+#[derive(Debug, Clone)]
+pub struct OverlaySettings<'a> {
+    pub theme: &'a str,
+    pub graph: &'a str,
+    pub graph_fade: bool,
+    pub view: ViewMode,
+    pub smart_interval_secs: u64,
+    pub refresh_interval_ms: u64,
+    pub temp_unit: TempUnit,
+    pub columns: VisibleColumns,
+}
+
+impl OverlaySettings<'_> {
+    /// As config-file values ready to write: `("theme", "\"nord\"")`,
+    /// `("graph_fade", "true")`.
+    pub fn values(&self) -> Vec<(&'static str, String)> {
+        let temp = match self.temp_unit {
+            TempUnit::Celsius => "celsius",
+            TempUnit::Fahrenheit => "fahrenheit",
+        };
+        let cols = COLUMN_NAMES
+            .iter()
+            .filter(|(_, bit)| self.columns.contains(*bit))
+            .map(|(n, _)| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        vec![
+            ("theme", format!("\"{}\"", self.theme)),
+            ("graph", format!("\"{}\"", self.graph)),
+            ("graph_fade", self.graph_fade.to_string()),
+            ("view", format!("\"{}\"", self.view.name())),
+            ("smart_interval_secs", self.smart_interval_secs.to_string()),
+            ("refresh_interval_ms", self.refresh_interval_ms.to_string()),
+            ("temp_unit", format!("\"{temp}\"")),
+            ("columns", format!("[{cols}]")),
+        ]
+    }
+}
+
+/// Set `values` in config text, keeping everything else: comments, key
+/// order, the keys the overlay doesn't touch (watch paths, ignores, tab).
+///
+/// A key already in the file has its value replaced in place, keeping any
+/// trailing comment; every occurrence is replaced, since the parser lets
+/// the last one win. A key that isn't there is appended at the end.
+/// Commented-out examples (`# watch_paths = …`) are left alone.
+pub fn set_values(text: &str, values: &[(&str, String)]) -> String {
+    let mut seen = vec![false; values.len()];
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.lines() {
+        let code = strip_comment(line);
+        let key = code.split_once('=').map(|(k, _)| k.trim());
+        match key.and_then(|k| values.iter().position(|(name, _)| *name == k)) {
+            Some(i) => {
+                seen[i] = true;
+                let (name, value) = &values[i];
+                let indent = &line[..line.len() - line.trim_start().len()];
+                let comment = line[code.len()..].trim();
+                out.push_str(&format!("{indent}{name} = {value}"));
+                if !comment.is_empty() {
+                    out.push_str(&format!(" {comment}"));
+                }
+            }
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    let missing: Vec<usize> = (0..values.len()).filter(|i| !seen[*i]).collect();
+    if !missing.is_empty() {
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str("# Saved from the settings overlay (,).\n");
+        for i in missing {
+            out.push_str(&format!("{} = {}\n", values[i].0, values[i].1));
+        }
+    }
+    out
+}
+
+/// Write `values` into the config file at `path`: the existing file with
+/// those keys updated, or, when there's none yet, the commented default
+/// file with them filled in. Written to a temporary file and renamed into
+/// place, so a failed write never leaves a half-written config behind.
+pub fn save_values(path: &Path, values: &[(&str, String)]) -> std::io::Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => default_file_contents(),
+        Err(e) => return Err(e),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, set_values(&text, values))?;
+    std::fs::rename(&tmp, path)
+}
+
+// ---------------------------------------------------------------------
 // Value parsing
 // ---------------------------------------------------------------------
 
@@ -567,6 +670,118 @@ pub fn validate_tab(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_values() -> Vec<(&'static str, String)> {
+        let mut cols = VisibleColumns(VisibleColumns::ALL);
+        cols.toggle(VisibleColumns::TEMP);
+        OverlaySettings {
+            theme: "nord",
+            graph: "dots",
+            graph_fade: true,
+            view: ViewMode::Dense,
+            smart_interval_secs: 60,
+            refresh_interval_ms: 2000,
+            temp_unit: TempUnit::Fahrenheit,
+            columns: cols,
+        }
+        .values()
+    }
+
+    #[test]
+    fn saved_values_parse_back_to_what_was_saved() {
+        let text = set_values(&default_file_contents(), &sample_values());
+        let cfg = Config::parse(&text);
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(cfg.theme.as_deref(), Some("nord"));
+        assert_eq!(cfg.graph.as_deref(), Some("dots"));
+        assert_eq!(cfg.graph_fade, Some(true));
+        assert_eq!(cfg.view, Some(ViewMode::Dense));
+        assert_eq!(cfg.smart_interval_secs, Some(60));
+        assert_eq!(cfg.refresh_interval_ms, Some(2000));
+        assert_eq!(cfg.temp_unit, Some(TempUnit::Fahrenheit));
+        let cols = cfg.columns.expect("columns");
+        assert!(!cols.contains(VisibleColumns::TEMP));
+        assert!(cols.contains(VisibleColumns::SMART) && cols.contains(VisibleColumns::SIZE));
+        // Every key once: replaced in place, nothing appended.
+        assert_eq!(text.matches("\ntheme = ").count(), 1, "{text}");
+        assert!(!text.contains("Saved from the settings overlay"), "{text}");
+    }
+
+    #[test]
+    fn saving_keeps_comments_and_untouched_keys() {
+        let before = "\
+# my diskwatch
+theme = \"dark\"   # was light
+watch_paths = [\"~/src\"]
+# graph = \"bars\"
+ignore_mounts = [\"/mnt/backup\"]
+";
+        let after = set_values(before, &sample_values());
+        assert!(
+            after.starts_with("# my diskwatch\ntheme = \"nord\" # was light\n"),
+            "{after}"
+        );
+        assert!(after.contains("watch_paths = [\"~/src\"]\n"), "{after}");
+        assert!(
+            after.contains("ignore_mounts = [\"/mnt/backup\"]\n"),
+            "{after}"
+        );
+        assert!(
+            after.contains("# graph = \"bars\"\n"),
+            "a commented example stays: {after}"
+        );
+        assert!(
+            after.contains("# Saved from the settings overlay (,).\ngraph = \"dots\"\n"),
+            "{after}"
+        );
+        let cfg = Config::parse(&after);
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(cfg.watch_paths.map(|p| p.len()), Some(1));
+        assert_eq!(cfg.graph.as_deref(), Some("dots"));
+        // Saving again changes nothing.
+        assert_eq!(set_values(&after, &sample_values()), after);
+    }
+
+    #[test]
+    fn a_key_set_twice_is_updated_both_times() {
+        let after = set_values("view = \"full\"\nview = \"lite\"\n", &sample_values());
+        assert_eq!(after.matches("view = \"dense\"").count(), 2, "{after}");
+        assert_eq!(Config::parse(&after).view, Some(ViewMode::Dense));
+    }
+
+    #[test]
+    fn hiding_every_column_saves_an_empty_list() {
+        let v = OverlaySettings {
+            theme: "terminal",
+            graph: "bars",
+            graph_fade: false,
+            view: ViewMode::Full,
+            smart_interval_secs: 300,
+            refresh_interval_ms: 1000,
+            temp_unit: TempUnit::Celsius,
+            columns: VisibleColumns(0),
+        }
+        .values();
+        let text = set_values("", &v);
+        assert!(text.contains("columns = []"), "{text}");
+        assert_eq!(Config::parse(&text).columns, Some(VisibleColumns(0)));
+    }
+
+    #[test]
+    fn saving_creates_the_file_from_the_commented_default() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("diskwatch").join("config.toml");
+        save_values(&path, &sample_values()).expect("save");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# diskwatch config"), "{text}");
+        assert!(text.contains("theme = \"nord\""), "{text}");
+        assert!(!path.with_extension("toml.tmp").exists());
+        let cfg = Config::load_from(&path);
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(cfg.temp_unit, Some(TempUnit::Fahrenheit));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_full_file_parses_into_every_setting() {
