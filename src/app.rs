@@ -264,6 +264,8 @@ pub struct App {
     pub hot_selected: usize,
     /// First row of that list currently on screen.
     pub hot_offset: usize,
+    /// Which kind of volume the Volumes tab lists; `f` / `F` cycle it.
+    pub volume_filter: crate::tabs::volumes::VolumeKind,
     /// Last full enumeration (slow path — system_profiler + diskutil).
     last_metadata_refresh: Instant,
     /// Last usage refresh (fast path — sysinfo only).
@@ -341,6 +343,7 @@ impl App {
             live: LiveState::Live,
             host: read_host(devices.len()),
             selected_device: 0,
+            volume_filter: crate::tabs::volumes::VolumeKind::All,
             selected_fs: 0,
             hot_selected: 0,
             hot_offset: 0,
@@ -470,7 +473,7 @@ fn main_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
     }
 }
 
-fn handle_key(app: &mut App, key: KeyCode) {
+pub(crate) fn handle_key(app: &mut App, key: KeyCode) {
     // The settings overlay is shared by every view that offers it, so it
     // claims the keyboard before any view-specific handler — otherwise the
     // dense view's `s` would sort the file list behind an open dialog.
@@ -572,6 +575,15 @@ fn handle_key(app: &mut App, key: KeyCode) {
             app.smart
                 .set_interval(Duration::from_secs(DEFAULT_SMART_INTERVAL_SECS));
             app.smart_refresh_requested = true;
+        }
+
+        // The Volumes tab's kind filter: all → apfs → mdraid → zfs → lvm,
+        // skipping kinds this machine has none of.
+        KeyCode::Char('f') if app.active_tab == TabId::Volumes => {
+            app.volume_filter = app.volume_filter.cycle(&app.volumes, 1);
+        }
+        KeyCode::Char('F') if app.active_tab == TabId::Volumes => {
+            app.volume_filter = app.volume_filter.cycle(&app.volumes, -1);
         }
 
         // Horizontal keys always change tab, on every tab (issue #13).
@@ -1171,10 +1183,10 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     }
 
     let popup_w = 60u16.min(area.width.saturating_sub(4));
-    // 21 content lines plus the two border rows. The list already filled
+    // 22 content lines plus the two border rows. The list already filled
     // the box exactly before `L` was added, so this has to grow with it
     // or the last line silently drops off.
-    let popup_h = 23u16.min(area.height.saturating_sub(4));
+    let popup_h = 24u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup = Rect {
@@ -1219,6 +1231,7 @@ fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         ]),
         Line::from(vec![key("Home End"), desc("jump to first / last")]),
         Line::from(vec![key("PgUp PgDn"), desc("jump by 5")]),
+        Line::from(vec![key("f F"), desc("Volumes: filter by kind")]),
         Line::from(""),
         Line::from(vec![key("r"), desc("force SMART refresh now")]),
         Line::from(vec![key("+ -"), desc("nudge SMART poll interval")]),

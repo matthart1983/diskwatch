@@ -19,6 +19,76 @@ use crate::collect::zfs::{VdevClass, ZfsPool, ZfsVdev};
 use crate::ui::format::{fmt_size, pad_left, pad_right, usage_color};
 use crate::ui::palette as p;
 
+/// The Volumes tab's filter: every kind, or just one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VolumeKind {
+    #[default]
+    All,
+    Apfs,
+    Mdraid,
+    Zfs,
+    Lvm,
+}
+
+impl VolumeKind {
+    const ORDER: [VolumeKind; 5] = [
+        VolumeKind::All,
+        VolumeKind::Apfs,
+        VolumeKind::Mdraid,
+        VolumeKind::Zfs,
+        VolumeKind::Lvm,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            VolumeKind::All => "all",
+            VolumeKind::Apfs => "apfs",
+            VolumeKind::Mdraid => "mdraid",
+            VolumeKind::Zfs => "zfs",
+            VolumeKind::Lvm => "lvm",
+        }
+    }
+
+    /// This machine has at least one volume of this kind.
+    fn present(self, vols: &VolumeTick) -> bool {
+        match self {
+            VolumeKind::All => true,
+            VolumeKind::Apfs => !vols.containers.is_empty(),
+            VolumeKind::Mdraid => !vols.mdraid.is_empty(),
+            VolumeKind::Zfs => !vols.zfs.is_empty(),
+            VolumeKind::Lvm => !vols.lvm.is_empty(),
+        }
+    }
+
+    /// The filter in force: a kind whose last volume has gone (a pool
+    /// exported, a VG deactivated) falls back to all rather than an empty
+    /// tree.
+    pub fn effective(self, vols: &VolumeTick) -> VolumeKind {
+        if self.present(vols) {
+            self
+        } else {
+            VolumeKind::All
+        }
+    }
+
+    /// The next (`dir` 1) or previous (-1) kind this machine has.
+    pub fn cycle(self, vols: &VolumeTick, dir: isize) -> VolumeKind {
+        let kinds: Vec<VolumeKind> = Self::ORDER
+            .into_iter()
+            .filter(|k| k.present(vols))
+            .collect();
+        let at = kinds
+            .iter()
+            .position(|k| *k == self.effective(vols))
+            .unwrap_or(0) as isize;
+        kinds[(at + dir).rem_euclid(kinds.len() as isize) as usize]
+    }
+
+    fn shows(self, kind: VolumeKind) -> bool {
+        self == VolumeKind::All || self == kind
+    }
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let vols = &app.volumes;
     if vols.containers.is_empty()
@@ -34,8 +104,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(2), Constraint::Min(8)])
         .split(area);
 
-    draw_filter_row(f, rows[0], vols);
-    draw_tree(f, rows[1], app);
+    let filter = app.volume_filter.effective(vols);
+    draw_filter_row(f, rows[0], vols, filter);
+    draw_tree(f, rows[1], app, filter);
 }
 
 fn draw_empty(f: &mut Frame, area: Rect, vols: &VolumeTick) {
@@ -86,7 +157,7 @@ fn note_line(note: &str) -> Line<'static> {
     ])
 }
 
-fn draw_filter_row(f: &mut Frame, area: Rect, vols: &VolumeTick) {
+fn draw_filter_row(f: &mut Frame, area: Rect, vols: &VolumeTick, filter: VolumeKind) {
     let (containers, mdraid, zfs, lvm) = (&vols.containers, &vols.mdraid, &vols.zfs, &vols.lvm);
     let plural = |n: usize, what: &str| format!("{} {}{}", n, what, if n == 1 { "" } else { "s" });
     let total_vols: usize = containers.iter().map(|c| c.volumes.len()).sum();
@@ -112,27 +183,40 @@ fn draw_filter_row(f: &mut Frame, area: Rect, vols: &VolumeTick) {
         }
         parts.join(" / ")
     };
-    let line = Line::from(vec![
+    // The active kind is bracketed as well as bold, so it reads on a
+    // monochrome terminal too. Kinds this machine has none of are faint:
+    // `f` skips them.
+    let mut spans = vec![
         Span::raw(" "),
         Span::styled("show", Style::default().fg(p::dim())),
-        Span::raw("  "),
-        Span::styled(
-            "all",
-            Style::default()
-                .fg(p::br_white())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled("apfs", Style::default().fg(p::fg())),
-        Span::raw("  "),
-        Span::styled("mdraid", Style::default().fg(p::fg())),
-        Span::raw("  "),
-        Span::styled("zfs", Style::default().fg(p::fg())),
-        Span::raw("  "),
-        Span::styled("lvm", Style::default().fg(p::fg())),
-        Span::raw("  "),
-        Span::styled(format!("({})", summary), Style::default().fg(p::dim())),
-    ]);
+        Span::raw(" "),
+    ];
+    for kind in VolumeKind::ORDER {
+        let (text, style) = if kind == filter {
+            (
+                format!("[{}]", kind.label()),
+                Style::default()
+                    .fg(p::br_white())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if kind.present(vols) {
+            (format!(" {} ", kind.label()), Style::default().fg(p::fg()))
+        } else {
+            (
+                format!(" {} ", kind.label()),
+                Style::default().fg(p::faint()),
+            )
+        };
+        spans.push(Span::styled(text, style));
+    }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("f", Style::default().fg(p::cyan())));
+    spans.push(Span::styled(" filter  ", Style::default().fg(p::dim())));
+    spans.push(Span::styled(
+        format!("({})", summary),
+        Style::default().fg(p::dim()),
+    ));
+    let line = Line::from(spans);
     f.render_widget(
         Paragraph::new(line).style(Style::default().bg(p::bg())),
         Rect {
@@ -144,7 +228,7 @@ fn draw_filter_row(f: &mut Frame, area: Rect, vols: &VolumeTick) {
     );
 }
 
-fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
+fn draw_tree(f: &mut Frame, area: Rect, app: &App, filter: VolumeKind) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::faint()).bg(p::bg()))
@@ -192,7 +276,12 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     let mut y = inner.y + 2;
     let max_y = inner.y + inner.height;
 
-    for container in &app.volumes.containers {
+    let containers = app
+        .volumes
+        .containers
+        .iter()
+        .filter(|_| filter.shows(VolumeKind::Apfs));
+    for container in containers {
         if y >= max_y {
             break;
         }
@@ -210,7 +299,12 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    for arr in &app.volumes.mdraid {
+    for arr in app
+        .volumes
+        .mdraid
+        .iter()
+        .filter(|_| filter.shows(VolumeKind::Mdraid))
+    {
         if y >= max_y {
             break;
         }
@@ -234,7 +328,12 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let hot = app.hot_files.pool_activity(&app.filesystems);
-    for pool in &app.volumes.zfs {
+    for pool in app
+        .volumes
+        .zfs
+        .iter()
+        .filter(|_| filter.shows(VolumeKind::Zfs))
+    {
         if y >= max_y {
             break;
         }
@@ -268,7 +367,12 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    for vg in &app.volumes.lvm {
+    for vg in app
+        .volumes
+        .lvm
+        .iter()
+        .filter(|_| filter.shows(VolumeKind::Lvm))
+    {
         let lines = lvm_vg_lines(vg);
         if y >= max_y {
             break;
@@ -294,7 +398,17 @@ fn draw_tree(f: &mut Frame, area: Rect, app: &App) {
     // volumes are listed: their absence would otherwise look like none,
     // and pools kept from an earlier listing would look current.
     y += 1;
-    for note in app.volumes.zfs_note.iter().chain(&app.volumes.lvm_note) {
+    let zfs_note = app
+        .volumes
+        .zfs_note
+        .iter()
+        .filter(|_| filter.shows(VolumeKind::Zfs));
+    let lvm_note = app
+        .volumes
+        .lvm_note
+        .iter()
+        .filter(|_| filter.shows(VolumeKind::Lvm));
+    for note in zfs_note.chain(lvm_note) {
         if y >= max_y {
             break;
         }
@@ -956,8 +1070,13 @@ mod tests {
     use ratatui::Terminal;
 
     fn render(vols: VolumeTick) -> String {
+        render_filtered(vols, VolumeKind::All)
+    }
+
+    fn render_filtered(vols: VolumeTick, filter: VolumeKind) -> String {
         let mut app = App::new_for_test(TabId::Volumes, ViewMode::Full);
         app.volumes = vols;
+        app.volume_filter = filter;
         let mut term = Terminal::new(TestBackend::new(170, 24)).expect("terminal");
         term.draw(|f| draw(f, f.area(), &app)).expect("draw");
         let buf = term.backend().buffer().clone();
@@ -1175,6 +1294,102 @@ mod tests {
         let out = render(VolumeTick::default());
         assert!(out.contains("LVM"), "{out}");
         assert!(!out.contains("not listed yet"), "{out}");
+    }
+
+    fn zfs_and_lvm() -> VolumeTick {
+        VolumeTick {
+            zfs: fixtures::pools(fixtures::RAIDZ1),
+            lvm: crate::collect::lvm::fixtures::vgs(),
+            zfs_note: Some("zfs note".into()),
+            lvm_note: Some("lvm note".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_filter_cycles_through_kinds_present() {
+        let vols = zfs_and_lvm();
+        let mut k = VolumeKind::All;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            k = k.cycle(&vols, 1);
+            seen.push(k);
+        }
+        assert_eq!(
+            seen,
+            [VolumeKind::Zfs, VolumeKind::Lvm, VolumeKind::All],
+            "apfs and mdraid are skipped"
+        );
+        assert_eq!(VolumeKind::All.cycle(&vols, -1), VolumeKind::Lvm);
+        // Nothing to filter by: stays on all.
+        assert_eq!(
+            VolumeKind::All.cycle(&VolumeTick::default(), 1),
+            VolumeKind::All
+        );
+    }
+
+    #[test]
+    fn a_filter_whose_volumes_vanished_falls_back_to_all() {
+        let vols = VolumeTick {
+            lvm: crate::collect::lvm::fixtures::vgs(),
+            ..Default::default()
+        };
+        assert_eq!(VolumeKind::Zfs.effective(&vols), VolumeKind::All);
+        assert_eq!(VolumeKind::Zfs.cycle(&vols, 1), VolumeKind::Lvm);
+        let out = render_filtered(vols, VolumeKind::Zfs);
+        assert!(
+            out.contains("[all]") && out.contains("\u{25be} data"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn filtering_shows_one_kind_and_its_note() {
+        let out = render_filtered(zfs_and_lvm(), VolumeKind::Lvm);
+        assert!(out.contains("[lvm]") && !out.contains("[all]"), "{out}");
+        assert!(
+            out.contains("\u{25be} data") && out.contains("lvm note"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("\u{25be} media") && !out.contains("zfs note"),
+            "{out}"
+        );
+
+        let out = render_filtered(zfs_and_lvm(), VolumeKind::Zfs);
+        assert!(
+            out.contains("\u{25be} media") && out.contains("zfs note"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("\u{25be} data") && !out.contains("lvm note"),
+            "{out}"
+        );
+
+        let out = render(zfs_and_lvm());
+        assert!(out.contains("[all]"), "{out}");
+        assert!(
+            out.contains("\u{25be} media") && out.contains("\u{25be} data"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn f_cycles_the_filter_only_on_the_volumes_tab() {
+        use crossterm::event::KeyCode;
+        let mut app = App::new_for_test(TabId::Volumes, ViewMode::Full);
+        app.volumes = zfs_and_lvm();
+        crate::app::handle_key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.volume_filter, VolumeKind::Zfs);
+        crate::app::handle_key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.volume_filter, VolumeKind::Lvm);
+        crate::app::handle_key(&mut app, KeyCode::Char('F'));
+        assert_eq!(app.volume_filter, VolumeKind::Zfs);
+
+        let mut app = App::new_for_test(TabId::Overview, ViewMode::Full);
+        app.volumes = zfs_and_lvm();
+        crate::app::handle_key(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.volume_filter, VolumeKind::All);
     }
 
     fn text(lines: Vec<Line<'static>>) -> String {

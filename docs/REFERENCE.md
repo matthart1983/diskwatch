@@ -133,6 +133,7 @@ Rust 1.75+.
 | `↑` `↓` `j` `k` | Move selection |
 | `/` | Filter files (Lite, Dense) |
 | `s` | Cycle file sort (Dense) |
+| `f` / `F` | Volumes: filter by kind (all, apfs, mdraid, zfs, lvm), skipping kinds not present |
 | `p` | Pause / resume |
 | `,` | Settings — columns, temperature unit, SMART interval, theme, view |
 | `r` | Force a SMART refresh |
