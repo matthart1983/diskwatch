@@ -430,6 +430,7 @@ impl App {
             &self.io.latest,
             &self.smart,
             &self.hot_files,
+            &self.volumes,
         );
     }
 }

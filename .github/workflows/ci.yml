@@ -36,3 +36,44 @@ jobs:
       - name: Test Windows mounted-folder I/O
         if: runner.os == 'Windows'
         run: cargo test windows_folder_mount_reads_io_counters -- --ignored
+
+  # Real lvm2 output on real (loop-device) volume groups, so the parser is
+  # checked against the lvm2 that ships, not just hand-written fixtures.
+  # Runs as root: the reporting tools need it.
+  lvm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the test binary
+        run: cargo test --no-run
+
+      - name: Build a VG with linear, RAID1, thin and snapshot LVs
+        run: |
+          set -ex
+          sudo apt-get update -q
+          sudo apt-get install -yq lvm2 thin-provisioning-tools
+          sudo modprobe dm-raid dm-thin-pool dm-snapshot
+          for i in 0 1 2; do
+            truncate -s 256M "/tmp/pv$i.img"
+            sudo losetup -f --show "/tmp/pv$i.img" | tee -a /tmp/loops
+          done
+          mapfile -t L < /tmp/loops
+          sudo pvcreate "${L[@]}"
+          sudo vgcreate dwtest "${L[@]}"
+          sudo lvcreate -y -L 64M -n lin dwtest
+          sudo lvcreate -y --type raid1 -m1 -L 32M -n mirr dwtest
+          sudo lvcreate -y -L 96M -T dwtest/pool
+          sudo lvcreate -y -V 128M -T dwtest/pool -n thinvol
+          sudo dd if=/dev/urandom of=/dev/dwtest/thinvol bs=1M count=40 oflag=direct
+          sudo lvcreate -y -s -L 16M -n snap dwtest/lin
+          sudo dd if=/dev/urandom of=/dev/dwtest/lin bs=1M count=12 oflag=direct
+          sudo lvs -a dwtest
+          for t in vgs lvs pvs; do sudo $t --reportformat json --units b --nosuffix; done
+
+      - name: Parse the real reports
+        run: |
+          sudo env "PATH=$PATH" "HOME=$HOME" \
+            cargo test real_lvm_reports_parse -- --ignored --nocapture
+          sudo env "PATH=$PATH" "HOME=$HOME" cargo run -q -- --diag | sed -n '/=== LVM/,$p'

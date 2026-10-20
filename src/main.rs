@@ -416,6 +416,38 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
                 }
             }
         }
+
+        let lvm = collect::lvm::probe();
+        println!("\n=== LVM volume groups ({}) ===", lvm.vgs.len());
+        if let Some(note) = &lvm.note {
+            println!("  {}", note);
+        }
+        for vg in &lvm.vgs {
+            println!(
+                "  {}  size={}  free={}  attr={}  missing_pvs={}",
+                vg.name, vg.size_bytes, vg.free_bytes, vg.attr, vg.missing_pvs
+            );
+            for lv in &vg.lvs {
+                println!(
+                    "    {}  kind={}  size={}  attr={}  health={:?}  sync={:?}  data={:?}  meta={:?}  dev={}",
+                    lv.name,
+                    lv.kind(),
+                    lv.size_bytes,
+                    lv.attr,
+                    lv.health,
+                    lv.sync_percent,
+                    lv.data_percent,
+                    lv.metadata_percent,
+                    lv.dev.as_deref().unwrap_or("-")
+                );
+            }
+            for pv in &vg.pvs {
+                println!(
+                    "    pv {}  size={}  free={}  missing={}",
+                    pv.path, pv.size_bytes, pv.free_bytes, pv.missing
+                );
+            }
+        }
     }
 
     println!(

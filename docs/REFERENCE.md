@@ -32,12 +32,12 @@ Falls back to a compact screen below 104×32, keeping the mirror and the percent
 |---|---|---|---|
 | 1 | Overview | KPI tiles, device summary, aggregate IO, capacity bar | — |
 | 2 | Devices | model, firmware, serial, used %, SMART, per-device detail | `lsblk`, `nvme list`, `diskutil list`, `hdparm -I` |
-| 3 | Volumes | APFS containers + roles; mdraid members, `[UUUU]` state, resync progress; ZFS pools, vdevs and member health | `lvs`, `vgs`, `mdadm --detail`, `diskutil apfs list`, `zpool list -v` |
+| 3 | Volumes | APFS containers + roles; mdraid members, `[UUUU]` state, resync progress; ZFS pools, vdevs and member health; LVM volume groups with their LVs (thin pool and snapshot usage, RAID sync, health) and PVs | `lvs`, `vgs`, `pvs`, `mdadm --detail`, `diskutil apfs list`, `zpool list -v` |
 | 4 | FS | mounts with usage bars, thresholds, system/user/removable | `df -h`, `df -i`, `mount`, `findmnt` |
 | 5 | IO | per-device throughput, 48s sparkline, p50/p99 read and write | `iostat -x 1` |
 | 6 | SMART | full NVMe/ATA attribute tables when `smartctl` is present | `smartctl -A`, `nvme smart-log` |
 | 7 | Hot Files | paths by event rate (FSEvents / inotify), with the process holding each one | `fatrace`, `fs_usage`, `lsof` |
-| 8 | Insights | capacity, SMART, wear, temperature, latency and hot-file anomalies | — |
+| 8 | Insights | capacity, SMART, wear, temperature, latency and hot-file anomalies; LVM VGs missing a PV, unhealthy LVs, thin pools and snapshots filling | — |
 
 ### Who is writing that file
 
@@ -68,6 +68,12 @@ usable space. A pool counts once however many of its datasets are mounted. If `z
 fails or takes more than 2s to answer, diskwatch keeps the pools from the last listing that
 worked and the Volumes tab says they're out of date. If it has never answered, or isn't
 installed, the pools are left out and the tab says why.
+
+LVM volume groups come from `vgs`, `lvs` and `pvs` JSON reports, which need root. Run
+unprivileged, diskwatch lists the active LVs from sysfs instead (`/sys/block/dm-*/dm`),
+with their sizes and the PVs under them, but no VG free space, health, or thin pool and
+snapshot usage, and the Volumes tab says so. Thin pools are hidden in that mode, because
+sysfs shows them only as internal sub-devices. LVs on dm-crypt list the crypt device as their PV.
 
 ## Lite
 
@@ -241,7 +247,7 @@ reporting the kernel's bare "No space left on device", which sends people lookin
 | SMART attributes | ✅ `smartctl` if installed | ✅ `smartctl` if installed, as root |
 | Volumes — APFS / mdraid | ✅ `diskutil apfs list` | ✅ `/proc/mdstat` |
 | Volumes — ZFS | ⏳ deferred | ✅ `zpool list -v`, no root needed |
-| Volumes — LVM | ⏳ deferred | ⏳ deferred |
+| Volumes — LVM | — | ✅ `vgs`/`lvs`/`pvs` as root; active LVs from sysfs otherwise |
 | Hot files — paths | ✅ FSEvents | ✅ inotify |
 | Hot files — bytes / pid | ❌ needs root or entitlement | ❌ needs eBPF biosnoop |
 | Capacity growth + time-to-full | ✅ 10-min usage window | ✅ 10-min usage window |

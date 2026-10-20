@@ -5,7 +5,8 @@
 //! for trending toward bad, INFO for noteworthy state.
 
 use crate::collect::hot_files::HotFileWatcher;
-use crate::collect::{DeviceTick, FsTick, IoTick, SmartCollector};
+use crate::collect::lvm::LvmVg;
+use crate::collect::{DeviceTick, FsTick, IoTick, SmartCollector, VolumeTick};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -38,8 +39,15 @@ pub fn evaluate(
     io: &[IoTick],
     smart: &SmartCollector,
     hot_files: &HotFileWatcher,
+    volumes: &VolumeTick,
 ) -> Vec<Insight> {
     let mut out = Vec::new();
+    if let Some(i) = lvm_unhealthy(&volumes.lvm) {
+        out.push(i);
+    }
+    if let Some(i) = lvm_space_running_out(&volumes.lvm) {
+        out.push(i);
+    }
     if let Some(i) = capacity_critical(filesystems) {
         out.push(i);
     }
@@ -140,6 +148,114 @@ fn capacity_warning(fs: &[FsTick]) -> Option<Insight> {
         title: "Filesystem nearing capacity".into(),
         body,
         suggested_tab: "fs",
+    })
+}
+
+/// A VG missing a PV, or an LV lvm2 reports unhealthy. CRIT where data is
+/// unreachable or a write will fail; WARN where it still works but needs
+/// a hand (`lvchange --refresh`, a scrub that found mismatches).
+fn lvm_unhealthy(vgs: &[LvmVg]) -> Option<Insight> {
+    let mut sev = Severity::Warn;
+    let mut body = Vec::new();
+    for vg in vgs {
+        if vg.is_partial() {
+            sev = Severity::Crit;
+            let n = vg.missing_pvs.max(1);
+            body.push(format!(
+                "  VG {} \u{2014} {} PV{} missing",
+                vg.name,
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+        for lv in &vg.lvs {
+            let what = if lv.is_invalid_snapshot() {
+                "snapshot overflowed and was invalidated"
+            } else if lv.health.is_empty() {
+                continue;
+            } else {
+                lv.health.as_str()
+            };
+            if lv.is_invalid_snapshot()
+                || matches!(
+                    lv.health.as_str(),
+                    "partial" | "failed" | "out of data" | "metadata read only"
+                )
+            {
+                sev = Severity::Crit;
+            }
+            body.push(format!("  {}/{} \u{2014} {}", vg.name, lv.name, what));
+        }
+    }
+    if body.is_empty() {
+        return None;
+    }
+    body.truncate(4);
+    Some(Insight {
+        sev,
+        title: "LVM volume unhealthy".into(),
+        body,
+        suggested_tab: "volumes",
+    })
+}
+
+/// Thin pools and classic snapshots that are filling. Neither degrades
+/// gracefully: a full thin pool stops all writes to every thin volume in
+/// it, and a full snapshot is invalidated.
+fn lvm_space_running_out(vgs: &[LvmVg]) -> Option<Insight> {
+    let mut hits: Vec<(f32, String)> = Vec::new();
+    for vg in vgs {
+        for lv in &vg.lvs {
+            if lv.is_invalid_snapshot() {
+                continue; // already reported as unhealthy
+            }
+            let line = if lv.is_thin_pool() {
+                let (d, m) = (
+                    lv.data_percent.unwrap_or(0.0),
+                    lv.metadata_percent.unwrap_or(0.0),
+                );
+                let worst = d.max(m);
+                if worst < 80.0 {
+                    continue;
+                }
+                (
+                    worst,
+                    format!(
+                        "  thin pool {}/{} \u{2014} data {d:.0}%, metadata {m:.0}%",
+                        vg.name, lv.name
+                    ),
+                )
+            } else if lv.is_snapshot() {
+                let d = lv.data_percent.unwrap_or(0.0);
+                if d < 80.0 {
+                    continue;
+                }
+                (
+                    d,
+                    format!("  snapshot {}/{} \u{2014} {d:.0}% full", vg.name, lv.name),
+                )
+            } else {
+                continue;
+            };
+            hits.push(line);
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let sev = if hits[0].0 >= 95.0 {
+        Severity::Crit
+    } else {
+        Severity::Warn
+    };
+    let mut body = vec!["Writes stop when a thin pool fills; a full snapshot is dropped.".into()];
+    body.extend(hits.into_iter().take(3).map(|(_, l)| l));
+    Some(Insight {
+        sev,
+        title: "LVM space running out".into(),
+        body,
+        suggested_tab: "volumes",
     })
 }
 
@@ -379,6 +495,46 @@ mod tests {
             ro_image: ignored,
             ignored,
         }
+    }
+
+    #[test]
+    fn a_healthy_lvm_setup_raises_nothing() {
+        let vgs = crate::collect::lvm::fixtures::vgs();
+        assert!(lvm_unhealthy(&vgs).is_none());
+        // The snapshot at 83% is worth a warning, the pool at 61% isn't.
+        let i = lvm_space_running_out(&vgs).expect("snapshot warning");
+        assert_eq!(i.sev, Severity::Warn);
+        assert!(i.body.iter().any(|l| l.contains("snapshot data/home_snap")));
+        assert!(!i.body.iter().any(|l| l.contains("thin pool data/")));
+    }
+
+    #[test]
+    fn a_degraded_vg_is_critical() {
+        let vgs = crate::collect::lvm::fixtures::degraded();
+        let i = lvm_unhealthy(&vgs).expect("unhealthy");
+        assert_eq!(i.sev, Severity::Crit);
+        let body = i.body.join("\n");
+        assert!(body.contains("VG data \u{2014} 1 PV missing"), "{body}");
+        assert!(body.contains("data/mirror \u{2014} partial"), "{body}");
+        assert!(
+            body.contains("data/old_snap \u{2014} snapshot overflowed"),
+            "{body}"
+        );
+
+        let i = lvm_space_running_out(&vgs).expect("pool nearly full");
+        assert_eq!(i.sev, Severity::Crit, "96% data");
+        assert!(
+            !i.body.iter().any(|l| l.contains("old_snap")),
+            "reported once"
+        );
+    }
+
+    #[test]
+    fn refresh_needed_is_a_warning() {
+        let mut vgs = crate::collect::lvm::fixtures::vgs();
+        vgs[0].lvs[2].health = "refresh needed".into();
+        let i = lvm_unhealthy(&vgs).expect("unhealthy");
+        assert_eq!(i.sev, Severity::Warn);
     }
 
     #[test]

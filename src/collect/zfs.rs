@@ -418,8 +418,9 @@ fn kernel_name(path: &str) -> Option<String> {
     (!name.is_empty() && !name.contains('/')).then(|| name.to_string())
 }
 
+/// Shared with the LVM collector, which runs its tools the same way.
 #[cfg(target_os = "linux")]
-enum Run {
+pub(crate) enum Run {
     Ok(String),
     Missing,
     TimedOut,
@@ -456,7 +457,7 @@ fn failure_note(run: &Run, kept: bool) -> String {
 /// stuck in the kernel on a suspended pool can't die until the kernel lets
 /// go, and the UI mustn't wait for that.
 #[cfg(target_os = "linux")]
-fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Run {
+pub(crate) fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Run {
     use std::io::Read;
     use std::process::{Command, Stdio};
 
