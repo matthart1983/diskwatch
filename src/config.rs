@@ -299,8 +299,18 @@ pub fn config_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| home_dir().map(|h| h.join(".config")))?;
     Some(base.join("diskwatch").join("config.toml"))
+}
+
+/// `$HOME`, or on Windows, where it usually isn't set, `%USERPROFILE%`.
+/// Without the fallback a Windows user had no config location at all:
+/// nothing was read, and the settings overlay had nowhere to save.
+fn home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    #[cfg(windows)]
+    let home = home.or_else(|| std::env::var_os("USERPROFILE"));
+    home.filter(|h| !h.is_empty()).map(PathBuf::from)
 }
 
 /// A commented file showing every key at its built-in default. Written by

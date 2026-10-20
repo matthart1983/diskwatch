@@ -181,7 +181,7 @@ diskwatch --write-config
 
 writes a commented file listing every setting at its default, to
 `$XDG_CONFIG_HOME/diskwatch/config.toml` (`~/.config/diskwatch/config.toml` if that's
-unset — macOS included). `$DISKWATCH_CONFIG` or `--config PATH` points elsewhere;
+unset — macOS included; `%USERPROFILE%\.config\diskwatch\config.toml` on Windows). `$DISKWATCH_CONFIG` or `--config PATH` points elsewhere;
 `--no-config` ignores it entirely.
 
 `S` in the settings overlay (`,`) saves what the overlay shows (theme, graph style and
