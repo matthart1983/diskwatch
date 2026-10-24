@@ -10,7 +10,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        diskwatch = pkgs.callPackage ./package.nix { };
+        diskwatch = pkgs.callPackage ./package.nix {
+          rev = self.shortRev or self.dirtyShortRev or null;
+        };
       in
       {
         packages = {

@@ -2,6 +2,9 @@
   lib,
   rustPlatform,
   versionCheckHook,
+  # Short git rev of the source, appended to the version as semver build
+  # metadata. The flake passes it; null leaves the plain Cargo.toml version.
+  rev ? null,
 }:
 
 let
@@ -9,7 +12,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = cargoToml.package.name;
-  inherit (cargoToml.package) version;
+  version = cargoToml.package.version + lib.optionalString (rev != null) "+${rev}";
 
   src = lib.cleanSource ./.;
 
@@ -17,6 +20,10 @@ rustPlatform.buildRustPackage {
 
   nativeInstallCheckInputs = [ versionCheckHook ];
   doInstallCheck = true;
+  # `diskwatch --version` prints only the Cargo.toml version, not the rev.
+  preVersionCheck = ''
+    version=${cargoToml.package.version}
+  '';
 
   meta = {
     description = "Single-host, read-only disk diagnostics TUI — sibling to netwatch and syswatch";
