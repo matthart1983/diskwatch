@@ -1,17 +1,22 @@
 {
   lib,
   rustPlatform,
+  versionCheckHook,
 }:
 
+let
+  cargoToml = lib.importTOML ./Cargo.toml;
+in
 rustPlatform.buildRustPackage {
-  pname = "diskwatch";
-  # Keep in sync with Cargo.toml's `version` on every release — the Nix
-  # derivation label otherwise drifts from the actual source contents.
-  version = "0.5.9";
+  pname = cargoToml.package.name;
+  inherit (cargoToml.package) version;
 
   src = lib.cleanSource ./.;
 
   cargoLock.lockFile = ./Cargo.lock;
+
+  nativeInstallCheckInputs = [ versionCheckHook ];
+  doInstallCheck = true;
 
   meta = {
     description = "Single-host, read-only disk diagnostics TUI — sibling to netwatch and syswatch";
