@@ -1176,11 +1176,39 @@ mod tests {
 
     /// The `(device, inode)` pair for `path`, in the same representation as
     /// the watch pairs below.
+    ///
+    /// The device comes from the mount, not from `Metadata::dev`. fdinfo's
+    /// `sdev` is the superblock's device, and on btrfs (one per subvolume)
+    /// and overlayfs `stat` reports a different one, so a live watch would
+    /// never match. `/proc/self/mountinfo` prints the superblock's device,
+    /// and the open file's fdinfo names its mount.
     #[cfg(target_os = "linux")]
     fn file_key(path: &Path) -> (u64, u64) {
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::metadata(path).expect("metadata");
-        (metadata.dev(), metadata.ino())
+        let file = std::fs::File::open(path).expect("open");
+        let ino = file.metadata().expect("metadata").ino();
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))
+            .expect("fdinfo");
+        let mnt_id = info
+            .lines()
+            .find_map(|line| line.strip_prefix("mnt_id:"))
+            .expect("mnt_id")
+            .trim();
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").expect("mountinfo");
+        // `36 35 0:35 /home /home rw ...`: mount id, parent id, major:minor.
+        let (major, minor) = mountinfo
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                if fields.next()? != mnt_id {
+                    return None;
+                }
+                let (major, minor) = fields.nth(1)?.split_once(':')?;
+                Some((major.parse::<u64>().ok()?, minor.parse::<u64>().ok()?))
+            })
+            .expect("mount of the path");
+        (new_encode_dev((major << 20) | minor), ino)
     }
 
     /// `(device, inode)` pairs for every live inotify watch in this process,
