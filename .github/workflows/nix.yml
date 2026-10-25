@@ -3,20 +3,38 @@ name: Nix
 on:
   push:
     branches: [main]
+    paths:
+      - "src/**"
+      - Cargo.toml
+      - Cargo.lock
+      - flake.nix
+      - flake.lock
+      - package.nix
+      - .github/workflows/nix.yml
   pull_request:
     branches: [main]
+    paths:
+      - "src/**"
+      - Cargo.toml
+      - Cargo.lock
+      - flake.nix
+      - flake.lock
+      - package.nix
+      - .github/workflows/nix.yml
 
 jobs:
   # Builds package.nix the way a Nix user gets it: cargo test runs inside the
-  # build sandbox, then versionCheckHook runs the installed binary.
+  # build sandbox, then versionCheckHook runs the installed binary. The
+  # flake's checks include the package, so `nix flake check` does both.
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
 
-      - name: Check the flake
+      - name: Build and test
         run: nix flake check -L
-
-      - name: Build
-        run: nix build -L .#diskwatch

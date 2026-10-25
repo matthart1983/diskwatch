@@ -19,10 +19,17 @@ use tabs::TabId;
 /// systemd unit, a one-off `DISKWATCH_WATCH_PATHS=/srv diskwatch`.
 const WATCH_PATHS_ENV: &str = "DISKWATCH_WATCH_PATHS";
 
+/// What `--version` reports. A packager can set `DISKWATCH_BUILD_VERSION`
+/// at build time to add build metadata; the Nix flake adds the git rev.
+const VERSION: &str = match option_env!("DISKWATCH_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser, Debug)]
 #[command(
     name = "diskwatch",
-    version,
+    version = VERSION,
     about = "Single-host disk diagnostics TUI",
     after_help = "Settings can also be written to a config file — see --write-config.\n\
                   Precedence: CLI flag > environment variable > config file > default."
