@@ -118,7 +118,7 @@ cargo build --release
 ./target/release/diskwatch
 ```
 
-Rust 1.75+.
+Rust 1.95+.
 
 </details>
 

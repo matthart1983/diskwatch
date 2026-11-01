@@ -136,7 +136,7 @@ fn panel_areas(area: Rect, n: usize) -> Vec<Rect> {
 
     let mut out = Vec::with_capacity(n);
     for (r, row_area) in row_areas.iter().enumerate() {
-        let in_row = if r == rows - 1 && n % cols != 0 {
+        let in_row = if r == rows - 1 && !n.is_multiple_of(cols) {
             n % cols
         } else {
             cols

@@ -1,0 +1,27 @@
+# Weekly update PRs. Security updates arrive as soon as an advisory is
+# published, independently of this schedule.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Patch and minor updates in one PR a week, rather than one per crate.
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+    # These change APIs on a 0.x minor, and move together in 0.14.
+    ignore:
+      - dependency-name: ratatui
+      - dependency-name: crossterm
+      - dependency-name: sysinfo
+      - dependency-name: notify
+      - dependency-name: unicode-width
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

@@ -321,6 +321,7 @@ pub(crate) fn from_sysfs(lvs: &[SysfsLv]) -> Vec<LvmVg> {
 }
 
 /// Volume groups, plus a word when they couldn't be read in full.
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Default)]
 pub struct LvmProbe {
     pub vgs: Vec<LvmVg>,
