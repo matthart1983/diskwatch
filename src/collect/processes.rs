@@ -145,9 +145,7 @@ impl ProcessCollector {
 
         let rates_due = self
             .last_rates
-            // `Option::is_none_or` would read better but lands in 1.82,
-            // and diskwatch pins its MSRV at 1.75.
-            .map_or(true, |t| now.duration_since(t) >= RATE_INTERVAL);
+            .is_none_or(|t| now.duration_since(t) >= RATE_INTERVAL);
         if rates_due {
             // Elapsed is measured, not assumed: a paused app or a busy
             // frame makes the real gap longer than RATE_INTERVAL, and
@@ -162,7 +160,7 @@ impl ProcessCollector {
 
         let scan_due = self
             .last_scan
-            .map_or(true, |t| now.duration_since(t) >= SCAN_INTERVAL);
+            .is_none_or(|t| now.duration_since(t) >= SCAN_INTERVAL);
         if scan_due {
             let (owners, coverage) = scan_open_files();
             self.owners = owners;

@@ -1121,7 +1121,7 @@ fn format_refresh_label(ms: u64) -> String {
         return format!("{ms}ms");
     }
     let secs = ms as f64 / 1000.0;
-    if ms % 1000 == 0 {
+    if ms.is_multiple_of(1000) {
         format!("{}s", ms / 1000)
     } else {
         format!("{secs:.1}s")
