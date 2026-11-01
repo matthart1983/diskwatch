@@ -7,6 +7,7 @@ mod app;
 mod collect;
 mod config;
 mod insights;
+mod sanitize;
 mod tabs;
 mod ui;
 
@@ -269,7 +270,7 @@ fn main() -> Result<()> {
     // when the user quits. The settings overlay repeats the count, and
     // --diag reprints them in full, for whoever misses this.
     for w in &cfg.warnings {
-        eprintln!("diskwatch: config: {w}");
+        eprintln!("diskwatch: config: {}", sanitize::scrub(w));
     }
 
     collect::filesystems::set_ignore_rules(collect::filesystems::IgnoreRules {
@@ -308,7 +309,34 @@ fn main() -> Result<()> {
         watch_roots,
         config_source: cfg.source.clone(),
         config_warnings: cfg.warnings.clone(),
+        no_config: cli.no_config,
     })
+}
+
+/// `println!` for output that names paths, mounts or devices, which other
+/// users on the machine can choose. Each line is one line of output whatever
+/// those names contain, so a name can't forge a line or reach the terminal
+/// with its escape sequences. `--diag | head` closing the pipe is a normal way
+/// to stop, not a panic.
+macro_rules! diagln {
+    () => {
+        diag_line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        diag_line(format_args!($($arg)*))
+    };
+}
+
+fn diag_line(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let line = args.to_string();
+    if let Err(e) = writeln!(std::io::stdout(), "{}", sanitize::scrub(&line)) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("diskwatch: writing output: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// Write the commented default config, so "what can I set?" is answerable
@@ -331,41 +359,48 @@ fn write_config(explicit: Option<&std::path::Path>, force: bool) -> Result<()> {
     }
     std::fs::write(&path, config::default_file_contents())
         .with_context(|| format!("writing {}", path.display()))?;
-    println!("wrote {}", path.display());
+    diagln!("wrote {}", path.display());
     Ok(())
 }
 fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
-    println!("=== Config ===");
+    diagln!("=== Config ===");
     match &cfg.source {
-        Some(p) => println!("  file: {}", p.display()),
+        Some(p) => diagln!("  file: {}", p.display()),
         None => match config::config_path() {
-            Some(p) => println!("  file: (none) — would read {}", p.display()),
-            None => println!("  file: (none) — no HOME or XDG_CONFIG_HOME"),
+            Some(p) => diagln!("  file: (none) — would read {}", p.display()),
+            None => diagln!("  file: (none) — no HOME or XDG_CONFIG_HOME"),
         },
     }
     if cfg.warnings.is_empty() {
-        println!("  warnings: none");
+        diagln!("  warnings: none");
     } else {
-        println!("  warnings ({}):", cfg.warnings.len());
+        diagln!("  warnings ({}):", cfg.warnings.len());
         for w in &cfg.warnings {
-            println!("    {}", w);
+            diagln!("    {}", w);
         }
     }
 
-    println!("\n=== Hot Files roots ({}) ===", watch_roots.len());
+    diagln!();
+
+    diagln!("=== Hot Files roots ({}) ===", watch_roots.len());
     for r in watch_roots {
         // Say which ones won't work before the watcher says it in a
         // banner the user has to open a tab to see.
         let note = if r.exists() { "" } else { "  (missing)" };
-        println!("  {}{}", r.display(), note);
+        diagln!("  {}{}", r.display(), note);
     }
 
     let devices = collect::devices::collect();
-    println!("=== Devices ({}) ===", devices.len());
+    diagln!("=== Devices ({}) ===", devices.len());
     for d in &devices {
-        println!(
+        diagln!(
             "  {}  kind={:?}  size={}  used={}  model={:?}  smart={:?}",
-            d.name, d.kind, d.size_bytes, d.used_bytes, d.model, d.smart_ok
+            d.name,
+            d.kind,
+            d.size_bytes,
+            d.used_bytes,
+            d.model,
+            d.smart_ok
         );
     }
     let total: u64 = devices.iter().map(|d| d.size_bytes).sum();
@@ -375,17 +410,18 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
     } else {
         0
     };
-    println!("  TOTAL: size={}  used={}  pct={}%", total, used, pct);
+    diagln!("  TOTAL: size={}  used={}  pct={}%", total, used, pct);
 
     #[cfg(target_os = "macos")]
     {
-        println!("\n=== container_to_physical map ===");
+        diagln!();
+        diagln!("=== container_to_physical map ===");
         let cmap = collect::macos::container_to_physical_map();
         if cmap.is_empty() {
-            println!("  (empty)");
+            diagln!("  (empty)");
         }
         for (synth, phys) in &cmap {
-            println!("  {} -> {}", synth, phys);
+            diagln!("  {} -> {}", synth, phys);
         }
     }
 
@@ -394,17 +430,22 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let zfs = collect::zfs::probe();
-        println!("\n=== ZFS pools ({}) ===", zfs.pools.len());
+        diagln!();
+        diagln!("=== ZFS pools ({}) ===", zfs.pools.len());
         if let Some(note) = &zfs.note {
-            println!("  {}", note);
+            diagln!("  {}", note);
         }
         for pool in &zfs.pools {
-            println!(
+            diagln!(
                 "  {}  size={}  alloc={}  free={}  health={}",
-                pool.name, pool.size_bytes, pool.alloc_bytes, pool.free_bytes, pool.health
+                pool.name,
+                pool.size_bytes,
+                pool.alloc_bytes,
+                pool.free_bytes,
+                pool.health
             );
             for v in &pool.vdevs {
-                println!(
+                diagln!(
                     "    {}  class={}  size={}  alloc={:?}  health={}",
                     v.name,
                     v.class.label(),
@@ -413,7 +454,7 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
                     v.health
                 );
                 for m in &v.members {
-                    println!(
+                    diagln!(
                         "      {} -> {}  slot={}  health={}",
                         m.path,
                         m.dev.as_deref().unwrap_or("(unresolved)"),
@@ -425,17 +466,22 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
         }
 
         let lvm = collect::lvm::probe();
-        println!("\n=== LVM volume groups ({}) ===", lvm.vgs.len());
+        diagln!();
+        diagln!("=== LVM volume groups ({}) ===", lvm.vgs.len());
         if let Some(note) = &lvm.note {
-            println!("  {}", note);
+            diagln!("  {}", note);
         }
         for vg in &lvm.vgs {
-            println!(
+            diagln!(
                 "  {}  size={}  free={}  attr={}  missing_pvs={}",
-                vg.name, vg.size_bytes, vg.free_bytes, vg.attr, vg.missing_pvs
+                vg.name,
+                vg.size_bytes,
+                vg.free_bytes,
+                vg.attr,
+                vg.missing_pvs
             );
             for lv in &vg.lvs {
-                println!(
+                diagln!(
                     "    {}  kind={}  size={}  attr={}  health={:?}  sync={:?}  data={:?}  meta={:?}  dev={}",
                     lv.name,
                     lv.kind(),
@@ -449,22 +495,31 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
                 );
             }
             for pv in &vg.pvs {
-                println!(
+                diagln!(
                     "    pv {}  size={}  free={}  missing={}",
-                    pv.path, pv.size_bytes, pv.free_bytes, pv.missing
+                    pv.path,
+                    pv.size_bytes,
+                    pv.free_bytes,
+                    pv.missing
                 );
             }
         }
     }
 
-    println!(
-        "\n=== Filesystems ({}) ===",
+    diagln!();
+
+    diagln!(
+        "=== Filesystems ({}) ===",
         collect::filesystems::collect().len()
     );
     for m in collect::filesystems::collect() {
-        println!(
+        diagln!(
             "  {} -> {}  ({})  size={}  used={}",
-            m.device, m.mount, m.fs_type, m.size_bytes, m.used_bytes
+            m.device,
+            m.mount,
+            m.fs_type,
+            m.size_bytes,
+            m.used_bytes
         );
     }
 
