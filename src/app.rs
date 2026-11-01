@@ -70,6 +70,8 @@ pub struct Options {
     /// before the alternate screen opens, but the overlay is where a user
     /// who missed that scrollback will look.
     pub config_warnings: Vec<String>,
+    /// `--no-config`: settings last for this session, and `S` writes nothing.
+    pub no_config: bool,
 }
 
 impl Options {
@@ -91,6 +93,7 @@ impl Options {
             watch_roots: Vec::new(),
             config_source: None,
             config_warnings: Vec::new(),
+            no_config: false,
         }
     }
 }
@@ -299,6 +302,7 @@ pub struct App {
     pub smart_refresh_requested: bool,
     pub should_quit: bool,
     /// The config file the startup settings came from, if any.
+    pub no_config: bool,
     pub config_source: Option<PathBuf>,
     /// Problems found reading it. Surfaced in the settings overlay.
     pub config_warnings: Vec<String>,
@@ -372,6 +376,7 @@ impl App {
             smart_refresh_requested: false,
             should_quit: false,
             config_source: opts.config_source,
+            no_config: opts.no_config,
             settings_status: None,
             config_warnings: opts.config_warnings,
         }
@@ -936,6 +941,9 @@ const SETTINGS_STATUS_SECS: u64 = 5;
 /// Where `S` writes: the file the settings came from, else the default
 /// location.
 fn settings_save_path(app: &App) -> Option<PathBuf> {
+    if app.no_config {
+        return None;
+    }
     app.config_source
         .clone()
         .or_else(crate::config::config_path)
@@ -945,10 +953,12 @@ fn settings_save_path(app: &App) -> Option<PathBuf> {
 /// config file, as netwatch does.
 fn save_settings(app: &mut App) {
     let Some(path) = settings_save_path(app) else {
-        app.settings_status = Some((
-            "\u{2717} Save failed: no config location (set DISKWATCH_CONFIG)".into(),
-            Instant::now(),
-        ));
+        let why = if app.no_config {
+            "\u{2717} Not saved: started with --no-config"
+        } else {
+            "\u{2717} Save failed: no config location (set DISKWATCH_CONFIG)"
+        };
+        app.settings_status = Some((why.into(), Instant::now()));
         return;
     };
     let values = crate::config::OverlaySettings {
@@ -1141,6 +1151,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     // and back doesn't leave a stale size behind.
     app.last_area = f.area();
     draw_inner(f, app);
+    crate::sanitize::scrub_buffer(f.buffer_mut());
 }
 
 fn draw_inner(f: &mut ratatui::Frame, app: &App) {
@@ -1581,6 +1592,9 @@ fn settings_footer(app: &App) -> Vec<String> {
     let mut out = vec![match (fresh, settings_save_path(app)) {
         (Some((msg, _)), _) => format!("  {msg}"),
         (None, Some(path)) => format!("  S saves to {}", tilde(&path)),
+        (None, None) if app.no_config => {
+            "  changes last for this session (--no-config)".to_string()
+        }
         (None, None) => "  changes last for this session (no config location)".to_string(),
     }];
     if !app.config_warnings.is_empty() {
@@ -2349,6 +2363,76 @@ mod tests {
         // We don't promise pretty output below the supported floor, only
         // that we don't panic.
         render_all_tabs(60, 20);
+    }
+
+    /// A file name is the one string on screen any local user can choose, and
+    /// the SMART tab tells people to run this as root.
+    #[test]
+    fn hostile_file_names_never_reach_a_cell() {
+        let hostile = "evil\u{1b}[31mRED\u{1b}]0;pwned\u{7}\u{202E}.log";
+        for view in [ViewMode::Full, ViewMode::Lite, ViewMode::Dense] {
+            let mut app = App::new(TabId::Hot, view);
+            {
+                let mut state = app.hot_files.state.lock().unwrap();
+                let path = PathBuf::from(format!("/tmp/{hostile}"));
+                state.activity.insert(
+                    path.clone(),
+                    collect::hot_files::FileActivity {
+                        path,
+                        events_per_sec: 9.0,
+                        total_events: 9,
+                        last_kind: collect::hot_files::ActivityKind::Modified,
+                        last_seen: Instant::now(),
+                        history: Default::default(),
+                        pushed: 0,
+                    },
+                );
+            }
+            let mut term = Terminal::new(TestBackend::new(170, 44)).expect("terminal");
+            let tabs: &[TabId] = if view == ViewMode::Full {
+                ALL_TABS
+            } else {
+                &[TabId::Hot]
+            };
+            for tab in tabs {
+                app.active_tab = *tab;
+                let frame = term.draw(|f| super::draw(f, &mut app)).expect("draw");
+                assert!(crate::sanitize::is_clean(frame.buffer), "{view:?} {tab:?}");
+            }
+            app.active_tab = TabId::Hot;
+            let frame = term.draw(|f| super::draw(f, &mut app)).expect("draw");
+            let text: String = frame.buffer.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("evil"), "{view:?} should still show the file");
+        }
+    }
+
+    #[test]
+    fn s_under_no_config_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("diskwatch-nc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let original = "theme = \"nord\"\nsmart_interval_secs = 60\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut app = App::new_for_test(TabId::Overview, ViewMode::Full);
+        app.no_config = true;
+        app.config_source = Some(path.clone());
+        assert_eq!(super::settings_save_path(&app), None);
+        assert!(super::settings_footer(&app)[0].contains("--no-config"));
+
+        super::handle_key(&mut app, KeyCode::Char(','));
+        app.temp_unit = TempUnit::Fahrenheit;
+        super::handle_key(&mut app, KeyCode::Char('S'));
+
+        let status = app
+            .settings_status
+            .as_ref()
+            .map(|(m, _)| m.as_str())
+            .unwrap_or("");
+        assert!(status.contains("--no-config"), "{status}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
