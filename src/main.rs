@@ -522,6 +522,14 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
             m.used_bytes
         );
     }
+    let stuck = collect::mounts::not_responding();
+    if !stuck.is_empty() {
+        diagln!();
+        diagln!("=== Not responding ({}) ===", stuck.len());
+        for m in &stuck {
+            diagln!("  {}  (statvfs didn't answer within a second)", m.display());
+        }
+    }
 
     Ok(())
 }

@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(not(target_os = "linux"))]
 use sysinfo::Disks;
 
 use crate::collect::zfs::ZfsPool;
@@ -276,18 +277,16 @@ pub fn refresh_usage(devices: &mut [DeviceTick]) {
 /// mounted filesystem to the device(s) backing it.
 #[cfg(target_os = "linux")]
 fn linux_used_by_device() -> HashMap<String, u64> {
-    let disks = Disks::new_with_refreshed_list();
     // Dedupe by raw mount source first: the same source mounted at
     // several points (bind mounts, btrfs subvolumes, `/` + `/nix/store`)
     // is one filesystem and must count once.
     let mut by_source: HashMap<String, u64> = HashMap::new();
-    for d in disks.list() {
-        let used = d.total_space().saturating_sub(d.available_space());
+    for d in crate::collect::mounts::list() {
+        let used = d.total.saturating_sub(d.available);
         if used == 0 {
             continue;
         }
-        let source = d.name().to_string_lossy().to_string();
-        let entry = by_source.entry(source).or_insert(0);
+        let entry = by_source.entry(d.device).or_insert(0);
         if used > *entry {
             *entry = used;
         }

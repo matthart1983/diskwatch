@@ -16,6 +16,12 @@ Changes from 0.7.1 on. Earlier releases are on the
 
 ### Fixed
 
+- A mount that doesn't answer no longer stops diskwatch starting. On Linux,
+  diskwatch read every mount's size on its main thread before showing
+  anything, so one stuck mount, such as a hung FUSE daemon or an automount
+  waiting on a disk, left the TUI and `--diag` waiting forever (#34). Each
+  mount now gets a second to answer. One that doesn't is left out, named in
+  Insights and in `--diag`, and asked again on the next refresh.
 - `S` in settings no longer overwrites your config file when you started with
   `--no-config`. It now says the settings weren't saved.
 - `diskwatch --diag | head -1` exits cleanly instead of panicking on the closed
