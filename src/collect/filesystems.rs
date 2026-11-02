@@ -7,8 +7,6 @@
 
 use std::sync::OnceLock;
 
-use sysinfo::Disks;
-
 #[derive(Debug, Clone)]
 pub struct FsTick {
     pub mount: String,
@@ -63,18 +61,16 @@ fn matches_rules(rules: &IgnoreRules, mount: &str, fs_type: &str) -> bool {
 }
 
 pub fn collect() -> Vec<FsTick> {
-    let disks = Disks::new_with_refreshed_list();
-    let mut out: Vec<FsTick> = disks
-        .list()
-        .iter()
+    let mut out: Vec<FsTick> = super::mounts::list()
+        .into_iter()
         .map(|d| {
-            let mount = d.mount_point().to_string_lossy().to_string();
-            let device = d.name().to_string_lossy().to_string();
-            let fs_type = d.file_system().to_string_lossy().to_string();
-            let total = d.total_space();
-            let avail = d.available_space();
+            let mount = d.mount_point.to_string_lossy().to_string();
+            let device = d.device;
+            let fs_type = d.fs_type;
+            let total = d.total;
+            let avail = d.available;
             let used = total.saturating_sub(avail);
-            let ro_image = is_ro_image(&device, &fs_type, d.is_read_only());
+            let ro_image = is_ro_image(&device, &fs_type, d.read_only);
             let ignored = ro_image
                 || IGNORE_RULES
                     .get()
@@ -90,7 +86,7 @@ pub fn collect() -> Vec<FsTick> {
                 used_bytes: used,
                 avail_bytes: avail,
                 inode_pct: None,
-                is_removable: d.is_removable(),
+                is_removable: d.removable,
             }
         })
         .collect();

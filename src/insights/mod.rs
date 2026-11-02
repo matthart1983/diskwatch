@@ -40,8 +40,12 @@ pub fn evaluate(
     smart: &SmartCollector,
     hot_files: &HotFileWatcher,
     volumes: &VolumeTick,
+    not_responding: &[std::path::PathBuf],
 ) -> Vec<Insight> {
     let mut out = Vec::new();
+    if let Some(i) = mounts_not_responding(not_responding) {
+        out.push(i);
+    }
     if let Some(i) = lvm_unhealthy(&volumes.lvm) {
         out.push(i);
     }
@@ -96,6 +100,30 @@ pub fn evaluate(
         Severity::Info => 2,
     });
     out
+}
+
+/// A mount that didn't answer is left out of every list, so say so rather
+/// than let it look as if it isn't there.
+fn mounts_not_responding(mounts: &[std::path::PathBuf]) -> Option<Insight> {
+    if mounts.is_empty() {
+        return None;
+    }
+    let mut body = vec![format!(
+        "{} mount{} didn't answer within a second, so {} size is unknown.",
+        mounts.len(),
+        if mounts.len() == 1 { "" } else { "s" },
+        if mounts.len() == 1 { "its" } else { "their" }
+    )];
+    for m in mounts.iter().take(3) {
+        body.push(format!("  {}", m.display()));
+    }
+    body.push("diskwatch keeps running and asks again on the next refresh.".into());
+    Some(Insight {
+        sev: Severity::Warn,
+        title: "Mount not responding".into(),
+        body,
+        suggested_tab: "fs",
+    })
 }
 
 fn capacity_critical(fs: &[FsTick]) -> Option<Insight> {
@@ -480,6 +508,19 @@ fn used_pct(m: &FsTick) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mount_that_does_not_answer_is_named() {
+        let stuck = [std::path::PathBuf::from("/mnt/NTFS1")];
+        let i = mounts_not_responding(&stuck).expect("insight");
+        assert_eq!(i.sev, Severity::Warn);
+        assert!(
+            i.body.iter().any(|l| l.contains("/mnt/NTFS1")),
+            "{:?}",
+            i.body
+        );
+        assert!(mounts_not_responding(&[]).is_none());
+    }
 
     fn fs(mount: &str, pct: u64, ignored: bool) -> FsTick {
         FsTick {

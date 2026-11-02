@@ -4,6 +4,7 @@ pub mod growth;
 pub mod hot_files;
 pub mod io;
 pub mod lvm;
+pub mod mounts;
 pub mod processes;
 pub mod smart;
 pub mod volumes;

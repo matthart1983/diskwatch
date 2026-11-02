@@ -443,6 +443,7 @@ impl App {
             &self.smart,
             &self.hot_files,
             &self.volumes,
+            &crate::collect::mounts::not_responding(),
         );
     }
 }
