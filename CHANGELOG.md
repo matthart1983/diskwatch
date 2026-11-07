@@ -3,6 +3,19 @@
 Changes from 0.7.1 on. Earlier releases are on the
 [releases page](https://github.com/matthart1983/diskwatch/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Stopping diskwatch with SIGTERM, SIGINT, SIGHUP or SIGQUIT, or a crash, no
+  longer leaves your shell in raw mode on the alternate screen, which needed
+  `reset` to fix. If diskwatch is stuck waiting on something, such as a slow
+  `smartctl`, it puts the terminal back and exits a second after the signal.
+- Ctrl-C quits. It did nothing before, because raw mode delivers it as a key.
+- The full view no longer crashes in a small terminal. It crashed below 5
+  rows, or narrower than its header's clock. Below 40×12 it now says the
+  terminal is too small. Lite and Dense draw at any size.
+
 ## [0.7.1] - 2026-11-01
 
 ### Security

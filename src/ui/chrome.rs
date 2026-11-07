@@ -56,17 +56,18 @@ pub fn draw_header(f: &mut Frame, area: Rect, host: &HostInfo, live: LiveState) 
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )];
 
+    // The clock wins when the row is narrower than both halves: the left
+    // side clips, and the right never runs past the row's edge.
+    let line = row(area, 0);
+    let right_w = right_w.min(line.width);
     let left_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width.saturating_sub(right_w),
-        height: 1,
+        width: line.width - right_w,
+        ..line
     };
     let right_area = Rect {
-        x: area.x + area.width.saturating_sub(right_w),
-        y: area.y,
+        x: line.x + left_area.width,
         width: right_w,
-        height: 1,
+        ..line
     };
 
     f.render_widget(
@@ -148,18 +149,8 @@ pub fn draw_tab_bar(f: &mut Frame, area: Rect, active: TabId, insight_count: usi
         underline.push(c);
     }
 
-    let labels_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let underline_area = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: 1,
-    };
+    let labels_area = row(area, 0);
+    let underline_area = row(area, 1);
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         labels_area,
@@ -231,18 +222,8 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
         }
     }
     // Divider row above the footer text.
-    let divider_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let text_area = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: 1,
-    };
+    let divider_area = row(area, 0);
+    let text_area = row(area, 1);
     let divider: String = "\u{2500}".repeat(area.width as usize);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -255,6 +236,20 @@ pub fn draw_footer(f: &mut Frame, area: Rect, extra: &[(char, &str)]) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(p::bg())),
         text_area,
     );
+}
+
+/// Row `i` of `area`, or an empty rect when `area` has no such row. In a
+/// short terminal the layout squeezes chrome to fewer rows than it draws,
+/// and a widget rendered below the buffer panics.
+fn row(area: Rect, i: u16) -> Rect {
+    if i >= area.height {
+        return Rect { height: 0, ..area };
+    }
+    Rect {
+        y: area.y + i,
+        height: 1,
+        ..area
+    }
 }
 
 fn format_uptime(secs: u64) -> String {

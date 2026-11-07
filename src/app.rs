@@ -3,11 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -450,18 +446,15 @@ impl App {
 
 pub fn run(opts: Options) -> Result<()> {
     let mut app = App::with_options(opts);
-
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let res = main_loop(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    let res = {
+        let _session = crate::term::Session::enter()?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+        main_loop(&mut terminal, &mut app)
+    };
+    // Exit the way a shell expects after a signal, with the terminal back.
+    if let Some(sig) = crate::term::stop_signal() {
+        std::process::exit(128 + sig);
+    }
     res
 }
 
@@ -471,13 +464,18 @@ fn main_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
         terminal.draw(|f| draw(f, app))?;
         if event::poll(frame_budget)? {
             if let Event::Key(k) = event::read()? {
+                // Raw mode turns Ctrl-C into a key, so it quits from here,
+                // even while a filter is taking input.
+                if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(());
+                }
                 if k.kind != KeyEventKind::Release {
                     handle_key(app, k.code);
                 }
             }
         }
         app.tick();
-        if app.should_quit {
+        if app.should_quit || crate::term::stop_signal().is_some() {
             return Ok(());
         }
     }
@@ -1195,6 +1193,11 @@ fn draw_inner(f: &mut ratatui::Frame, app: &App) {
         return;
     }
 
+    if full.width < FULL_MIN_W || full.height < FULL_MIN_H {
+        draw_too_small(f, full);
+        return;
+    }
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1230,6 +1233,37 @@ fn draw_inner(f: &mut ratatui::Frame, app: &App) {
     if app.show_settings {
         draw_settings_overlay(f, full, app);
     }
+}
+
+/// The smallest terminal the full view lays out in: five rows of chrome
+/// leave seven for a tab. Below it the view says so instead of drawing a
+/// clipped tab, as netwatch's dense view does. Lite and Dense have no floor.
+const FULL_MIN_W: u16 = 40;
+const FULL_MIN_H: u16 = 12;
+
+fn draw_too_small(f: &mut ratatui::Frame, area: Rect) {
+    use ratatui::text::Line;
+    use ratatui::widgets::Wrap;
+    let text = vec![
+        Line::styled(
+            "terminal too small for the full view",
+            Style::default().fg(p::yellow()),
+        ),
+        Line::styled(
+            format!(
+                "need {FULL_MIN_W}\u{d7}{FULL_MIN_H}, have {}\u{d7}{}",
+                area.width, area.height
+            ),
+            Style::default().fg(p::dim()),
+        ),
+        Line::styled("V switches view, q quits", Style::default().fg(p::dim())),
+    ];
+    f.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().bg(p::bg()))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
@@ -2497,5 +2531,120 @@ mod tests {
             .unwrap_or("");
         assert!(status.starts_with("\u{2717} Save failed"), "{status}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every view, tab and overlay at sizes down to 1×1, then with keys
+    /// pressed at each size. A small terminal must never panic.
+    #[test]
+    fn no_panic_at_any_terminal_size() {
+        use crossterm::event::KeyCode as K;
+        const W: &[u16] = &[
+            1, 2, 3, 4, 5, 8, 10, 12, 15, 16, 20, 30, 39, 40, 41, 80, 170,
+        ];
+        const H: &[u16] = &[1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 15, 24, 44];
+        let keys = [
+            K::Down,
+            K::Char('j'),
+            K::End,
+            K::Up,
+            K::Home,
+            K::Enter,
+            K::Enter,
+            K::Char('/'),
+            K::Char('x'),
+            K::Backspace,
+            K::Enter,
+            K::Esc,
+            K::Char('s'),
+            K::Char('1'),
+            K::Char('3'),
+            K::Char('6'),
+            K::Esc,
+            K::Char('f'),
+            K::Tab,
+            K::BackTab,
+            K::Char('?'),
+            K::Char('a'),
+            K::Char(','),
+            K::Down,
+            K::Char(' '),
+            K::Esc,
+            K::Char(','),
+        ];
+        let mut configs: Vec<(ViewMode, TabId)> =
+            ALL_TABS.iter().map(|t| (ViewMode::Full, *t)).collect();
+        configs.push((ViewMode::Lite, TabId::Overview));
+        configs.push((ViewMode::Dense, TabId::Overview));
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        let mut failures = Vec::new();
+        for &(view, tab) in &configs {
+            for &w in W {
+                for &h in H {
+                    for overlay in 0..3 {
+                        app.view = view;
+                        app.active_tab = tab;
+                        app.lite = Default::default();
+                        app.dense = Default::default();
+                        app.show_help = overlay == 1;
+                        app.show_settings = overlay == 2;
+                        let mut term = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            term.draw(|f| super::draw(f, &mut app)).expect("draw");
+                        }));
+                        if r.is_err() {
+                            failures.push(format!("{view:?}/{tab:?} overlay {overlay} at {w}x{h}"));
+                        }
+                    }
+                    app.view = view;
+                    app.active_tab = tab;
+                    app.show_help = false;
+                    app.show_settings = false;
+                    let mut term = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                    for (i, k) in keys.iter().enumerate() {
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handle_key(&mut app, *k);
+                            app.view = view;
+                            term.draw(|f| super::draw(f, &mut app)).expect("draw");
+                        }));
+                        if r.is_err() {
+                            failures.push(format!("{view:?}/{tab:?} key {i} {k:?} at {w}x{h}"));
+                            break;
+                        }
+                    }
+                    app.should_quit = false;
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} panics:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn full_view_says_when_the_terminal_is_too_small() {
+        let mut app = App::new(TabId::Overview, ViewMode::Full);
+        let text = |app: &mut App, w, h| {
+            let mut term = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+            let frame = term.draw(|f| super::draw(f, app)).expect("draw");
+            frame
+                .buffer
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+        for (w, h) in [(FULL_MIN_W - 1, FULL_MIN_H), (FULL_MIN_W, FULL_MIN_H - 1)] {
+            assert!(text(&mut app, w, h).contains("too small"), "{w}x{h}");
+        }
+        let fits = text(&mut app, FULL_MIN_W, FULL_MIN_H);
+        assert!(
+            !fits.contains("too small") && fits.contains("DiskWatch"),
+            "{fits}"
+        );
+        app.view = ViewMode::Lite;
+        assert!(!text(&mut app, 30, 10).contains("too small"));
     }
 }

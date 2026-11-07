@@ -138,7 +138,9 @@ Rust 1.95+.
 | `,` | Settings — columns, temperature unit, SMART interval, theme, view. `S` saves them |
 | `r` | Force a SMART refresh |
 | `?` | Help |
-| `q` / `Esc` | Quit |
+| `q` / `Esc` / `Ctrl-C` | Quit |
+
+The full view needs a terminal of at least 40×12 and says so below that. Lite and Dense draw at any size.
 
 ## Options
 
