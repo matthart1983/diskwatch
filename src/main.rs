@@ -9,6 +9,7 @@ mod config;
 mod insights;
 mod sanitize;
 mod tabs;
+mod term;
 mod ui;
 
 use app::{Options, TempUnit, ViewMode, VisibleColumns};

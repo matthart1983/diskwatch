@@ -51,12 +51,7 @@ fn draw_filter_row(f: &mut Frame, area: Rect, count: usize) {
     ]);
     f.render_widget(
         Paragraph::new(left).style(Style::default().bg(p::bg())),
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        },
+        Rect { height: 1, ..area }.intersection(area),
     );
 
     let right_text = format!("{} attached", count);
@@ -72,7 +67,8 @@ fn draw_filter_row(f: &mut Frame, area: Rect, count: usize) {
             y: area.y,
             width: right_w,
             height: 1,
-        },
+        }
+        .intersection(area),
     );
 }
 
