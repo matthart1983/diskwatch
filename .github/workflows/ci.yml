@@ -84,6 +84,55 @@ jobs:
       - name: cargo check on the minimum supported Rust
         run: cargo check --all-targets --locked
 
+  # The static (musl) builds, made the way release.yml makes them. They are
+  # the only builds that link mimalloc, and nothing else in CI compiles
+  # them, so a break would otherwise first show at tag time. The aarch64
+  # binary runs under qemu.
+  static:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ""
+          - target: aarch64-unknown-linux-musl
+            runner: qemu-aarch64-static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install zig and cargo-zigbuild, as release.yml does
+        run: |
+          python3 -m pip install --user ziglang cargo-zigbuild
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install qemu
+        if: matrix.runner != ''
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq qemu-user-static
+
+      - name: Build
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
+
+      - name: Run it
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/diskwatch
+          file "$bin"
+          # mimalloc is the static builds' allocator. Without it they grew
+          # to 912 MB under a file-change flood.
+          grep -qa mimalloc "$bin"
+          ${{ matrix.runner }} "$bin" --version
+          ${{ matrix.runner }} "$bin" --diag | head -20
+
   # Real lvm2 output on real (loop-device) volume groups, so the parser is
   # checked against the lvm2 that ships, not just hand-written fixtures.
   # Runs as root: the reporting tools need it.
