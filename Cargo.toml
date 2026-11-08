@@ -40,6 +40,15 @@ libc = "0.2"
 # byte- or char-aware: a CJK filename shears every column to its right.
 unicode-width = "0.2"
 
+# The static Linux builds only. Under a Hot Files event flood their musl
+# allocator kept what it freed: v0.7.1 reached 912 MB and was still growing a
+# minute after the writes stopped. With mimalloc the same run peaks at 37 to
+# 61 MB and falls back to about 20 MB. `no_thp` stops mimalloc asking Linux
+# for transparent huge pages, which cost about 50 MB at idle. glibc holds up
+# on its own, so unlike netwatch this isn't the allocator everywhere.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["no_thp"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

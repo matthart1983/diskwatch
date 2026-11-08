@@ -2647,4 +2647,49 @@ mod tests {
         app.view = ViewMode::Lite;
         assert!(!text(&mut app, 30, 10).contains("too small"));
     }
+
+    /// Lite and Dense build their file rows without history, then fill in
+    /// the rows they draw. A drawn row's sparkline must still follow it.
+    #[test]
+    fn drawn_file_rows_still_get_their_history() {
+        let render = |view: ViewMode, level: f64| -> String {
+            let mut app = App::new(TabId::Hot, view);
+            app.hot_files.wait();
+            {
+                let mut state = app.hot_files.state.lock().unwrap();
+                state.activity.clear();
+                let path = PathBuf::from("/tmp/drawn-row.log");
+                state.activity.insert(
+                    path.clone(),
+                    collect::hot_files::FileActivity {
+                        path,
+                        events_per_sec: 5.0,
+                        total_events: 5,
+                        last_kind: collect::hot_files::ActivityKind::Modified,
+                        last_seen: Instant::now(),
+                        history: std::collections::VecDeque::from(vec![level; 300]),
+                        pushed: 300,
+                    },
+                );
+            }
+            let mut term = Terminal::new(TestBackend::new(170, 44)).expect("terminal");
+            let frame = term.draw(|f| super::draw(f, &mut app)).expect("draw");
+            let w = frame.area.width as usize;
+            let cells: Vec<&str> = frame.buffer.content.iter().map(|c| c.symbol()).collect();
+            cells
+                .chunks(w)
+                .map(|row| row.concat())
+                .find(|line| line.contains("drawn-row.log"))
+                .unwrap_or_default()
+        };
+        for view in [ViewMode::Lite, ViewMode::Dense] {
+            let quiet = render(view, 0.0);
+            let busy = render(view, 150.0);
+            assert!(!quiet.is_empty(), "{view:?} should draw the row");
+            assert_ne!(
+                quiet, busy,
+                "{view:?}: the sparkline ignored the row's history"
+            );
+        }
+    }
 }
