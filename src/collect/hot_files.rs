@@ -383,16 +383,27 @@ impl HotFileWatcher {
     /// Returns a snapshot of the top N most-active files sorted by
     /// events-per-second descending.
     pub fn top(&self, n: usize) -> Vec<FileActivity> {
+        // Rank by reference and clone only the `n` returned. Cloning every
+        // tracked path with its history copied up to 10 MB a frame, 4.7% of
+        // a core at MAX_TRACKED, and the static build's old allocator never
+        // gave that memory back.
         let s = self.state.lock().unwrap();
-        let mut v: Vec<FileActivity> = s.activity.values().cloned().collect();
-        v.sort_by(|a, b| {
+        let mut v: Vec<&FileActivity> = s.activity.values().collect();
+        let order = |a: &&FileActivity, b: &&FileActivity| {
             b.events_per_sec
                 .partial_cmp(&a.events_per_sec)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.total_events.cmp(&a.total_events))
-        });
-        v.truncate(n);
-        v
+                // A total order, so equal rates don't swap places between
+                // frames on HashMap iteration order.
+                .then_with(|| a.path.cmp(&b.path))
+        };
+        if n < v.len() {
+            v.select_nth_unstable_by(n, order);
+            v.truncate(n);
+        }
+        v.sort_by(order);
+        v.into_iter().cloned().collect()
     }
 
     /// Hot-file activity per ZFS pool. `fs` is the current mount table.
@@ -889,6 +900,47 @@ pub fn resolve_roots(replace: Option<Vec<PathBuf>>, extra: &[PathBuf]) -> Vec<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_returns_the_busiest_n_in_rank_order() {
+        let w = HotFileWatcher::start(&[]);
+        w.wait();
+        {
+            let mut s = w.state.lock().unwrap();
+            for (name, rate, total) in [
+                ("a", 1.0, 5),
+                ("b", 9.0, 1),
+                ("c", 4.0, 7),
+                ("d", 4.0, 2),
+                ("e", 0.0, 0),
+                ("f", 0.0, 0),
+            ] {
+                let path = PathBuf::from(format!("/t/{name}"));
+                s.activity.insert(
+                    path.clone(),
+                    FileActivity {
+                        path,
+                        events_per_sec: rate,
+                        total_events: total,
+                        last_kind: ActivityKind::Modified,
+                        last_seen: Instant::now(),
+                        history: VecDeque::from(vec![rate; 300]),
+                        pushed: 300,
+                    },
+                );
+            }
+        }
+        let names = |n| -> Vec<String> {
+            w.top(n)
+                .iter()
+                .map(|a| a.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(3), ["b", "c", "d"], "rate, then total events");
+        assert_eq!(names(10), ["b", "c", "d", "a", "e", "f"], "then path");
+        assert!(names(0).is_empty());
+        assert_eq!(w.top(1)[0].history.len(), 300, "returned rows keep history");
+    }
 
     #[test]
     fn extra_roots_add_to_the_defaults_and_replacements_stand_in_for_them() {

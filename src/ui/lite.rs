@@ -374,17 +374,25 @@ pub struct HotRow {
     pub total_events: u64,
     pub kind: &'static str,
     pub secs_since_seen: u64,
+    /// Empty until [`fill_drawn`] runs on the rows actually drawn.
     pub history: Vec<f64>,
     /// Readings ever pushed — lets a sparkline group them by absolute index
     /// rather than by ring position. See `FileActivity::pushed`.
     pub pushed: u64,
     /// Busiest process holding this path open, if we could see one. An
     /// inference across two sampled readings, not a per-event pid — see
-    /// `collect::processes` for what it is worth.
+    /// `collect::processes` for what it is worth. `None` until
+    /// [`fill_drawn`] runs.
     pub owner: Option<crate::collect::ProcessTick>,
+    /// The watcher's key for this row, for [`fill_drawn`].
+    pub path: std::path::PathBuf,
 }
 
-/// Snapshot the watcher into display rows, sorted by activity.
+/// Snapshot the watcher into display rows, sorted by activity. Rows come
+/// without history or owner: those cost a copy of up to 300 readings and an
+/// fd lookup per path, and doing that for every tracked path on every frame
+/// took 7.5% of a core at 4,096 paths. Call [`fill_drawn`] on the rows that
+/// are drawn.
 pub fn collect_rows(app: &App) -> Vec<HotRow> {
     let state = match app.hot_files.state.lock() {
         Ok(s) => s,
@@ -418,9 +426,10 @@ pub fn collect_rows(app: &App) -> Vec<HotRow> {
                 total_events: a.total_events,
                 kind: a.last_kind.label(),
                 secs_since_seen: now.duration_since(a.last_seen).as_secs(),
-                history: a.history.iter().copied().collect(),
+                history: Vec::new(),
                 pushed: a.pushed,
-                owner: app.processes.likely_owner(&a.path).cloned(),
+                owner: None,
+                path: a.path.clone(),
             }
         })
         .collect();
@@ -437,6 +446,20 @@ pub fn collect_rows(app: &App) -> Vec<HotRow> {
             .then_with(|| a.full_path.cmp(&b.full_path))
     });
     rows
+}
+
+/// Fill in history and owner for the rows about to be drawn.
+pub fn fill_drawn(app: &App, rows: &mut [HotRow]) {
+    let Ok(state) = app.hot_files.state.lock() else {
+        return;
+    };
+    for row in rows {
+        if let Some(a) = state.activity.get(&row.path) {
+            row.history = a.history.iter().copied().collect();
+            row.pushed = a.pushed;
+        }
+        row.owner = app.processes.likely_owner(&row.path).cloned();
+    }
 }
 
 /// Rows matching the active filter. Matches filename **or** path,
@@ -1068,7 +1091,7 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
     );
 
     let lite = &app.lite;
-    let rows = filter_rows(collect_rows(app), &lite.filter_text);
+    let mut rows = filter_rows(collect_rows(app), &lite.filter_text);
 
     if rows.is_empty() {
         let (_, _, err) = app.hot_files.snapshot_meta();
@@ -1098,6 +1121,8 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
     let visible = l.visible_files(lite.detail_open) as usize;
     let offset = lite.offset.min(rows.len().saturating_sub(1));
     let sel = lite.selected.min(rows.len() - 1);
+    let drawn = offset..(offset + visible).min(rows.len());
+    fill_drawn(app, &mut rows[drawn]);
 
     let rate_style = |hot: bool| {
         Style::default().fg(if paused {

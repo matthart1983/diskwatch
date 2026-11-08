@@ -1940,12 +1940,13 @@ pub fn sorted_rows(app: &App) -> Vec<crate::ui::lite::HotRow> {
 }
 
 fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
-    let rows = sorted_rows(app);
+    let mut rows = sorted_rows(app);
     let st = &app.dense;
     let total = rows.len();
     let visible = area.height.saturating_sub(3) as usize;
     let first = st.offset.min(total.saturating_sub(1));
     let last = (first + visible).min(total);
+    crate::ui::lite::fill_drawn(app, &mut rows[first..last]);
 
     let sub = if st.filter_text.is_empty() {
         format!("{total} active")

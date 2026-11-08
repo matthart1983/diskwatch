@@ -15,6 +15,15 @@ Changes from 0.7.1 on. Earlier releases are on the
 - The full view no longer crashes in a small terminal. It crashed below 5
   rows, or narrower than its header's clock. Below 40×12 it now says the
   terminal is too small. Lite and Dense draw at any size.
+- The static Linux builds no longer grow without limit while files change
+  fast. Under 80,000 writes a second across 20,000 files, 0.7.1 reached
+  912 MB and was still growing a minute after the writes stopped. The same
+  run now peaks between 37 and 61 MB and falls back to about 20 MB. They use
+  mimalloc now. The glibc, macOS and Windows builds keep their system
+  allocator.
+- Hot Files copies the history of the files on screen only, not of every
+  file it tracks, on each frame. With 4,096 busy files, the most it tracks,
+  that copying took up to 7.5% of a core.
 
 ## [0.7.1] - 2026-11-01
 
