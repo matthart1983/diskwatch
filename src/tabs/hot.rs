@@ -108,6 +108,10 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(p::fg()),
         ));
     }
+    if let Some(note) = app.hot_files.limit_note() {
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(note, Style::default().fg(p::yellow())));
+    }
     if let Some(e) = &err {
         spans.push(Span::raw("   "));
         spans.push(Span::styled(

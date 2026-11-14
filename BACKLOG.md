@@ -6,7 +6,7 @@ One line per PR, in order, each with the check that closes it.
 
 - [x] P01 fix/terminal-restore-size-floor: signals and panics restore the terminal, Ctrl-C quits, Full view floor. No panic across the size grid; terminal restored after each signal
 - [x] P02 mimalloc on the static builds, and stop `top()` and Lite/Dense cloning every tracked path's history on each draw. Static build under 150 MB through the flood test
-- [ ] P03 Cap Hot Files watches and say what was skipped. A no-flag run stays under 25% of `max_user_watches` and 150 MB RSS
+- [x] P03 Cap Hot Files watches and say what was skipped. A no-flag run stays under 25% of `max_user_watches` and 150 MB RSS
 - [ ] P04 Hot Files stops counting its own install walk and itself, and names idle holders in PROCESS. A quiet 110-directory tree shows 0 events
 - [ ] P05 No "nominal" without SMART evidence. The disk-I/O insight skips zram, and "dominating" needs more than one disk
 - [ ] P06 Width-aware rows in Dense and Hot. CJK and emoji names keep the columns aligned

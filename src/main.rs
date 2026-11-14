@@ -105,8 +105,9 @@ struct Cli {
     /// ($HOME plus the OS log and tmp directories). Repeatable. A leading
     /// `~` expands to $HOME, for the case where your shell didn't.
     ///
-    /// Each path is watched recursively, which on Linux costs one inotify
-    /// watch per directory underneath it.
+    /// Each path is watched recursively. On Linux that costs one inotify
+    /// watch per directory, and diskwatch stops at a quarter of
+    /// fs.inotify.max_user_watches (65,536 at most), shallowest first.
     #[arg(long = "watch", value_name = "PATH")]
     watch: Vec<String>,
 
@@ -394,6 +395,17 @@ fn run_diag(cfg: &Config, watch_roots: &[PathBuf]) -> Result<()> {
         // banner the user has to open a tab to see.
         let note = if r.exists() { "" } else { "  (missing)" };
         diagln!("  {}{}", r.display(), note);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (budget, max) = collect::hot_files::watch_budget();
+        let max = max.map_or("unreadable".to_string(), |m| m.to_string());
+        diagln!(
+            "  watches at most {budget} directories, an eighth of them kept for ones made \
+             after startup (fs.inotify.max_user_watches is {max}; diskwatch takes a quarter, \
+             up to {})",
+            collect::hot_files::WATCH_CAP
+        );
     }
 
     let devices = collect::devices::collect();
