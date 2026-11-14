@@ -17,6 +17,7 @@ One line per PR, in order, each with the check that closes it.
 - [ ] Owner check: a real disk-backed writer shows in Hot Files, and the docs match what it shows
 - [ ] Listing: awesome-tuis PRs for diskwatch and netwatch, the awesome-rust link, an NFS issue and a help-wanted Windows NVMe issue
 - [x] If time: the `ERROR:` header for rootless podman directories, and the bare no-TTY error
+- [ ] Owner: tag v0.7.2 after the owner checks above (main already says 0.7.2)
 
 ## 0.7.3 install parity, target 10 Jan 2027
 
