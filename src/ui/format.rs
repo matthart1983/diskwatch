@@ -55,26 +55,68 @@ pub fn fmt_rate_compact(bps: f64) -> String {
     }
 }
 
-pub fn pad_right(s: &str, n: usize) -> String {
-    let len = s.chars().count();
-    if len >= n {
-        s.chars().take(n).collect()
-    } else {
-        let mut out = s.to_string();
-        out.push_str(&" ".repeat(n - len));
-        out
+/// Terminal columns `ch` takes: 2 for CJK and most emoji, 0 for combining
+/// marks. A control or bidi character counts as 1, because the screen
+/// scrubber draws it as a `·` of its own, which keeps a right-to-left
+/// override visible instead of folding it into its neighbour.
+pub fn char_cells(ch: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    if crate::sanitize::unsafe_for_display(ch) {
+        return 1;
     }
+    ch.width().unwrap_or(1)
 }
 
-pub fn pad_left(s: &str, n: usize) -> String {
-    let len = s.chars().count();
-    if len >= n {
-        s.chars().take(n).collect()
-    } else {
-        let mut out = " ".repeat(n - len);
-        out.push_str(s);
-        out
+/// Terminal columns `s` takes. Counting chars instead put a CJK filename
+/// at half its width and pushed every column after it off the row.
+pub fn cells(s: &str) -> usize {
+    s.chars().map(char_cells).sum()
+}
+
+/// The longest prefix of `s` that fits in `n` columns, and its width. A wide
+/// character that would straddle the edge is left out, not split.
+pub fn take_cells(s: &str, n: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = char_cells(ch);
+        if used + w > n {
+            break;
+        }
+        out.push(ch);
+        used += w;
     }
+    (out, used)
+}
+
+/// The longest suffix of `s` that fits in `n` columns, and its width.
+pub fn take_cells_end(s: &str, n: usize) -> (String, usize) {
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for ch in s.chars().rev() {
+        let w = char_cells(ch);
+        if used + w > n {
+            break;
+        }
+        kept.push(ch);
+        used += w;
+    }
+    (kept.into_iter().rev().collect(), used)
+}
+
+/// `s` padded or cut to exactly `n` columns, left-aligned.
+pub fn pad_right(s: &str, n: usize) -> String {
+    let (mut out, used) = take_cells(s, n);
+    out.push_str(&" ".repeat(n - used));
+    out
+}
+
+/// `s` padded or cut to exactly `n` columns, right-aligned.
+pub fn pad_left(s: &str, n: usize) -> String {
+    let (cut, used) = take_cells(s, n);
+    let mut out = " ".repeat(n - used);
+    out.push_str(&cut);
+    out
 }
 
 /// `green < 80, yellow 80-89, red >= 90` — matches JSX usage-bar thresholds.
@@ -115,5 +157,24 @@ mod tests {
         for bps in [0.0, 1.0, 999.0, 1e6, 1e12] {
             assert!(!fmt_rate_compact(bps).starts_with(' '), "{bps}");
         }
+    }
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    #[test]
+    fn padding_counts_columns_not_chars() {
+        assert_eq!(cells("日本語.log"), 10);
+        assert_eq!(cells(&pad_right("日本語.log", 12)), 12);
+        assert_eq!(cells(&pad_left("😀x", 6)), 6);
+        // A wide character that would straddle the edge is left out and
+        // the gap padded, so the width is still exact.
+        assert_eq!(pad_right("日本語", 5), "日本 ");
+        assert_eq!(take_cells_end("ab日本", 3), ("本".to_string(), 2));
+        assert_eq!(take_cells_end("ab日本", 5), ("b日本".to_string(), 5));
+        assert_eq!(cells("x\u{202E}y"), 3, "a bidi override shows as ·");
+        assert_eq!(pad_right("plain", 3), "pla");
     }
 }

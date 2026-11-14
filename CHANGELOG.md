@@ -42,6 +42,11 @@ Changes from 0.7.1 on. Earlier releases are on the
   tile reading "unknown". It now says no problems were found but SMART
   wasn't read, and why. Lite's capacity row says "capacity ok" instead of
   "all nominal", which is all that row checks.
+- Wide characters no longer break rows. Dense drew
+  `日本語のファイル名テスト.log` as `日           log`, and in the Hot tab a CJK
+  or emoji filename pushed the columns after it right, clipping AGE and
+  KIND. Padding and truncation now count terminal columns, and a wide
+  character takes its two cells.
 - "Dominating disk IO" counts physical disks only, and needs at least two.
   It named zram0, which is swap, and on a one-disk host it named the only
   disk.

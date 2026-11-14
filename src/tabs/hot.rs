@@ -458,12 +458,11 @@ fn draw_banner(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn display_path(s: &str, w: usize) -> String {
-    let len = s.chars().count();
-    if len <= w {
+    if crate::ui::format::cells(s) <= w {
         return s.to_string();
     }
     // Right-truncate with leading ellipsis so the filename is visible.
-    let tail: String = s.chars().skip(len - (w - 1)).collect();
+    let (tail, _) = crate::ui::format::take_cells_end(s, w.saturating_sub(1));
     format!("…{}", tail)
 }
 

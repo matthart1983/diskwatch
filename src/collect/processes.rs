@@ -79,18 +79,19 @@ impl ProcessTick {
     /// The pid survives clipping and the name gives way: the pid is what
     /// you type into `kill`, and it is the shorter half.
     pub fn label(&self, width: usize) -> String {
+        use crate::ui::format::{cells, take_cells};
         let full = format!("{} ({})", self.name, self.pid);
-        if full.chars().count() <= width {
+        if cells(&full) <= width {
             return full;
         }
         let pid = format!(" ({})", self.pid);
-        let room = width.saturating_sub(pid.chars().count() + 1);
+        let room = width.saturating_sub(cells(&pid) + 1);
         if room == 0 {
             // Narrower than the pid itself: the name is gone entirely and
             // an ellipsis in front of a bare pid is noise.
             return self.pid.to_string().chars().take(width).collect();
         }
-        let name: String = self.name.chars().take(room).collect();
+        let (name, _) = take_cells(&self.name, room);
         format!("{name}…{pid}")
     }
 }
