@@ -16,7 +16,7 @@ One line per PR, in order, each with the check that closes it.
 - [ ] Owner: delete diskwatch's `HOMEBREW_TAP_TOKEN` repo secret (and netwatch's, unused since its tap job stopped). Don't revoke the token itself while syswatch's release still uses one by that name
 - [ ] Owner check: a real disk-backed writer shows in Hot Files, and the docs match what it shows
 - [ ] Listing: awesome-tuis PRs for diskwatch and netwatch, the awesome-rust link, an NFS issue and a help-wanted Windows NVMe issue
-- [ ] If time: the `ERROR:` header for rootless podman directories, and the bare no-TTY error
+- [x] If time: the `ERROR:` header for rootless podman directories, and the bare no-TTY error
 
 ## 0.7.3 install parity, target 10 Jan 2027
 
