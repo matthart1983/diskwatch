@@ -24,7 +24,7 @@ const REPLACEMENT: char = '·';
 
 /// True for characters that can move the cursor, start an escape sequence or
 /// reorder the visible line.
-fn unsafe_for_display(c: char) -> bool {
+pub fn unsafe_for_display(c: char) -> bool {
     // C0 (including ESC, BEL, TAB, CR and LF), DEL, and C1, which includes the
     // 8-bit CSI U+009B that xterm-family terminals honour as readily as ESC [.
     c.is_control()
