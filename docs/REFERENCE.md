@@ -44,7 +44,8 @@ Falls back to a compact screen below 104×32, keeping the mirror and the percent
 Neither inotify nor FSEvents carries a pid, so the Hot Files PROCESS column is a join,
 not a measurement: diskwatch reads per-process byte rates (`/proc/<pid>/io`, `proc_pidinfo`)
 and open file descriptors (`/proc/<pid>/fd`, `PROC_PIDLISTFDS`), then names the busiest
-process holding each hot path open. Two limits, both stated on the tab rather than buried
+process holding each hot path open. A holder doing no IO at the moment is still named,
+dimmed. diskwatch leaves itself out. Two limits, both stated on the tab rather than buried
 here:
 
 - **It is sampled every 2s.** A writer that opens, writes and closes between two samples
@@ -55,6 +56,11 @@ here:
 
 Getting an exact pid per event needs fanotify with `FAN_REPORT_PID` or eBPF, both root.
 diskwatch runs as you, so it infers instead and shows its working.
+
+Activity means a change: a create, write, removal, rename or metadata change. Opening or
+reading a file isn't one, so listing a tree or reading a log leaves Hot Files quiet. inotify
+reports opens and FSEvents doesn't, and counting them on Linux put diskwatch's own
+directory walks in the list.
 
 ### ZFS pools
 
