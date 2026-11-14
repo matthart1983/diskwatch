@@ -12,7 +12,8 @@ One line per PR, in order, each with the check that closes it.
 - [x] P06 Width-aware rows in Dense and Hot. CJK and emoji names keep the columns aligned
 - [x] P07 `smartctl -n standby`: show "standby" and keep the last values
 - [ ] An HDD owner confirms P07 doesn't wake the disk
-- [ ] P08 Remove the Homebrew tap job and revoke `HOMEBREW_TAP_TOKEN`. README: `sudo` and `$HOME`, `secure_path`. Re-check the mid-session dead-mount note first: on 0.7.1 a mount dying under a running TUI no longer blocks it on Linux
+- [x] P08 Remove the Homebrew tap job. README: running under `sudo` (`secure_path`, `$HOME`), and the dead-mount limit on macOS and Windows (Linux no longer stalls)
+- [ ] Owner: delete diskwatch's `HOMEBREW_TAP_TOKEN` repo secret (and netwatch's, unused since its tap job stopped). Don't revoke the token itself while syswatch's release still uses one by that name
 - [ ] Owner check: a real disk-backed writer shows in Hot Files, and the docs match what it shows
 - [ ] Listing: awesome-tuis PRs for diskwatch and netwatch, the awesome-rust link, an NFS issue and a help-wanted Windows NVMe issue
 - [ ] If time: the `ERROR:` header for rootless podman directories, and the bare no-TTY error

@@ -44,9 +44,17 @@ builds, plus Linux armv5te and Windows x86_64.
 
 Install `smartmontools` for full SMART attribute tables. Without it, SMART reporting
 is limited to the basic health flag where available. On Linux smartctl needs root to
-read a drive, so run `sudo diskwatch` for SMART data; otherwise the SMART columns say
+read a drive, so run diskwatch as root for SMART data; otherwise the SMART columns say
 "needs root". A spun-down hard disk is left asleep (`smartctl -n standby`): the SMART tab
 says "standby" and keeps its last reading.
+
+Two things change under sudo. Its `secure_path` won't find a cargo or Homebrew install,
+and on most Linux distributions `$HOME` becomes root's, so Hot Files watches `/root`.
+Resolve both in your own shell first:
+
+```bash
+sudo "$(command -v diskwatch)" --watch "$HOME"
+```
 
 ## Run
 
@@ -93,6 +101,10 @@ Dense; `s` cycles file sorting in Dense.
 Hot Files infers the busiest process holding a path open; it does not identify the
 writer of each event. Sampling can miss short-lived writers, and unprivileged
 attribution is limited to your user.
+
+On macOS and Windows a network or FUSE mount that stops answering can stall diskwatch,
+at startup or later. On Linux each mount gets a second to answer, and one that doesn't is
+left out and named in Insights.
 
 Latency percentiles and histograms use sampled interval averages, not individual
 IO timings. macOS does not expose the device busy-time counter used for Linux
