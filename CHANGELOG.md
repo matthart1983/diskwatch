@@ -26,6 +26,11 @@ Changes from 0.7.1 on. Earlier releases are on the
   as the dense view's always have, so they hold twice the history. Lite's
   axis label says how far back that is.
 
+### Dense
+
+- While you type a filter, the file list narrows under the prompt. It used
+  to go blank until Enter, while the border still counted the matches.
+
 ## [0.7.2] - 2026-11-14
 
 ### Hot Files
