@@ -59,6 +59,18 @@ Changes from 0.7.1 on. Earlier releases are on the
   file it tracks, on each frame. With 4,096 busy files, the most it tracks,
   that copying took up to 7.5% of a core.
 
+### Release process
+
+- Releases no longer push a formula to the old `matthart1983/tap`. diskwatch
+  has been in Homebrew core since 0.5.x, and the tap job held a long-lived
+  token with write access to another repository.
+
+### Docs
+
+- The README says how to run diskwatch under sudo without losing your install
+  or your `$HOME`, and that on macOS and Windows a mount that stops answering
+  can still stall it.
+
 ## [0.7.1] - 2026-11-01
 
 ### Security
