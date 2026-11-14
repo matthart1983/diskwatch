@@ -29,6 +29,14 @@ Changes from 0.7.1 on. Earlier releases are on the
   for directories made after startup. The Hot Files tab says when a root
   isn't watched all the way down, and `--diag` shows the limit. The same
   default run now holds 57,344 watches and 38 MB.
+- Hot Files no longer counts opens and reads as activity, including its own.
+  On Linux a quiet tree of 110 directories showed 110 events from
+  diskwatch's own walk, and `ls -R` added 222 more. Both now show none. A
+  write's last event is labelled "modify" instead of "other".
+- The PROCESS column in Hot Files names a process that holds the file open
+  even when it's doing no IO, dimmed, as the docs describe. It was blank on
+  every row, because processes doing no IO were left out of the lookup.
+- diskwatch no longer lists itself as the busiest process.
 - Hot Files copies the history of the files on screen only, not of every
   file it tracks, on each frame. With 4,096 busy files, the most it tracks,
   that copying took up to 7.5% of a core.

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use notify::event::CreateKind;
 use notify::{
-    event::{EventKind, ModifyKind},
+    event::{AccessKind, AccessMode, EventKind, ModifyKind},
     RecursiveMode, Watcher,
 };
 
@@ -88,6 +88,9 @@ impl ActivityKind {
             EventKind::Modify(ModifyKind::Name(_)) => ActivityKind::Renamed,
             EventKind::Modify(ModifyKind::Metadata(_)) => ActivityKind::Metadata,
             EventKind::Modify(_) => ActivityKind::Modified,
+            // A file closed after writing. notify files it under access,
+            // which showed every write as "other".
+            EventKind::Access(AccessKind::Close(AccessMode::Write)) => ActivityKind::Modified,
             _ => ActivityKind::Other,
         }
     }
@@ -692,6 +695,13 @@ fn install(
     let watcher_result =
         notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
             let Ok(event) = result else { return };
+            // Opens aren't changes. inotify reports every one, reads and
+            // directory listings included, which put diskwatch's own walks
+            // and any `ls` among the hot files. FSEvents never reports them,
+            // so dropping them also makes Linux and macOS agree.
+            if let EventKind::Access(AccessKind::Open(_)) = event.kind {
+                return;
+            }
             let kind = ActivityKind::from_event(&event.kind);
             // notify can emit multiple paths per event (e.g. rename). We
             // record each path once.
@@ -1228,6 +1238,39 @@ mod tests {
         assert!(s.limit_note.is_none());
         assert!(s.error.is_none(), "{:?}", s.error);
         drop(s);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reading and listing a watched tree changes nothing, so it records
+    /// nothing. A write still counts.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reads_and_listings_are_not_activity() {
+        let dirs: Vec<String> = (0..110).map(|i| format!("d{i}")).collect();
+        let spec: Vec<&str> = dirs.iter().map(|d| d.as_str()).collect();
+        let root = tree("quiet", &spec);
+        std::fs::write(root.join("d0/existing.log"), "x").unwrap();
+        let w = HotFileWatcher::start_background(&[root.as_path()]);
+        w.wait();
+        for d in &dirs {
+            let _ = std::fs::read_dir(root.join(d)).unwrap().count();
+        }
+        let _ = std::fs::read(root.join("d0/existing.log")).unwrap();
+        std::fs::write(root.join("d5/new.log"), "y").unwrap();
+        let written = root.join("d5/new.log");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !w.state.lock().unwrap().activity.contains_key(&written) && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        // The close after the write is the last event, and it's a write.
+        thread::sleep(Duration::from_millis(100));
+        let s = w.state.lock().unwrap();
+        let paths: Vec<&PathBuf> = s.activity.keys().collect();
+        assert_eq!(paths, vec![&written], "only the write: {paths:?}");
+        assert_eq!(s.activity[&written].last_kind, ActivityKind::Modified);
+        drop(s);
+        drop(w);
         let _ = std::fs::remove_dir_all(&root);
     }
 
