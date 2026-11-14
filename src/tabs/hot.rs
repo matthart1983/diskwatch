@@ -108,6 +108,10 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(p::fg()),
         ));
     }
+    if let Some(note) = app.hot_files.limit_note() {
+        spans.push(Span::raw("   "));
+        spans.push(Span::styled(note, Style::default().fg(p::dim())));
+    }
     if let Some(e) = &err {
         spans.push(Span::raw("   "));
         spans.push(Span::styled(
@@ -454,12 +458,11 @@ fn draw_banner(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn display_path(s: &str, w: usize) -> String {
-    let len = s.chars().count();
-    if len <= w {
+    if crate::ui::format::cells(s) <= w {
         return s.to_string();
     }
     // Right-truncate with leading ellipsis so the filename is visible.
-    let tail: String = s.chars().skip(len - (w - 1)).collect();
+    let (tail, _) = crate::ui::format::take_cells_end(s, w.saturating_sub(1));
     format!("…{}", tail)
 }
 

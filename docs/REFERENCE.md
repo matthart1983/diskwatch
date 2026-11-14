@@ -44,7 +44,8 @@ Falls back to a compact screen below 104×32, keeping the mirror and the percent
 Neither inotify nor FSEvents carries a pid, so the Hot Files PROCESS column is a join,
 not a measurement: diskwatch reads per-process byte rates (`/proc/<pid>/io`, `proc_pidinfo`)
 and open file descriptors (`/proc/<pid>/fd`, `PROC_PIDLISTFDS`), then names the busiest
-process holding each hot path open. Two limits, both stated on the tab rather than buried
+process holding each hot path open. A holder doing no IO at the moment is still named,
+dimmed. diskwatch leaves itself out. Two limits, both stated on the tab rather than buried
 here:
 
 - **It is sampled every 2s.** A writer that opens, writes and closes between two samples
@@ -55,6 +56,11 @@ here:
 
 Getting an exact pid per event needs fanotify with `FAN_REPORT_PID` or eBPF, both root.
 diskwatch runs as you, so it infers instead and shows its working.
+
+Activity means a change: a create, write, removal, rename or metadata change. Opening or
+reading a file isn't one, so listing a tree or reading a log leaves Hot Files quiet. inotify
+reports opens and FSEvents doesn't, and counting them on Linux put diskwatch's own
+directory walks in the list.
 
 ### ZFS pools
 
@@ -233,11 +239,18 @@ diskwatch --watch-add /srv/data              # keep them, add one
 DISKWATCH_WATCH_PATHS=/srv:/var/log diskwatch
 ```
 
-Each root is watched recursively, which on Linux costs one inotify watch per directory
-underneath it. Point it at a large tree and you can exhaust
-`fs.inotify.max_user_watches` — diskwatch names the path and says so rather than
-reporting the kernel's bare "No space left on device", which sends people looking at
-`df`. A root that doesn't exist is named too, and doesn't stop the others being watched.
+On macOS and Windows each root is watched whole. On Linux every directory needs an inotify
+watch of its own, from a per-user pool (`fs.inotify.max_user_watches`) that editors, IDEs
+and sync tools share. diskwatch takes at most a quarter of that pool, and never more than
+65,536 directories. It walks all the roots together, level by level, so the top of each
+root is watched before the depths of any one. An eighth of the budget is kept for
+directories made after startup. When the limit stops it short, the Hot Files tab says which
+roots aren't watched all the way down, and `--diag` shows the numbers. Unreadable
+directories are skipped and counted rather than failing the root.
+
+If the pool itself runs out, diskwatch names the path and says so rather than reporting the
+kernel's bare "No space left on device", which sends people looking at `df`. A root that
+doesn't exist is named too, and doesn't stop the others being watched.
 
 ## What's real, what's deferred
 
@@ -267,6 +280,10 @@ shifts between machines. Two consequences worth knowing:
 - **macOS reports no utilisation.** IOKit counts service time, not time-with-IO-in-flight,
   which on a deep-queue NVMe exceeds wall clock. Dense sorts devices by throughput there and
   says so in its own border.
+- **A sleeping disk isn't woken.** SMART polls pass `smartctl -n standby`, so an ATA or
+  SCSI disk in standby is skipped and keeps its last reading, marked "standby". smartctl
+  warns that working out the device type can still wake some disks; that hasn't been
+  tried on a spinning disk yet.
 - **The latency histogram samples.** Each 200 ms tick contributes its op count to the bucket
   holding that tick's mean service time. It shows a sustained slow stretch; it smears a lone
   50 ms outlier into whatever its tick averaged.

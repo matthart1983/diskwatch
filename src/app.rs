@@ -405,6 +405,7 @@ impl App {
             // entries. The watcher thread keeps writing into the same
             // map between calls; we just shape it back down.
             self.hot_files.decay(usage_elapsed);
+            self.hot_files.adopt_new_dirs();
             self.host.uptime_secs = System::uptime();
             self.last_usage_refresh = Instant::now();
         }
@@ -2689,6 +2690,85 @@ mod tests {
             assert_ne!(
                 quiet, busy,
                 "{view:?}: the sparkline ignored the row's history"
+            );
+        }
+    }
+
+    /// The plan review's sample: Dense drew `日本語のファイル名テスト.log` as
+    /// `日           log`, and the Hot tab clipped AGE and KIND. A column after
+    /// the name must start at the same cell on every row.
+    #[test]
+    fn wide_file_names_keep_the_columns_aligned() {
+        let names = [
+            "plain-ascii-name.log",
+            "日本語のファイル名テスト.log",
+            "😀🎉 party.log",
+        ];
+        let column_of_777 = |view: ViewMode| -> Vec<Option<u16>> {
+            let mut app = App::new(TabId::Hot, view);
+            app.hot_files.wait();
+            {
+                let mut state = app.hot_files.state.lock().unwrap();
+                state.activity.clear();
+                for n in names {
+                    let path = PathBuf::from(format!("/tmp/w/{n}"));
+                    state.activity.insert(
+                        path.clone(),
+                        collect::hot_files::FileActivity {
+                            path,
+                            events_per_sec: 3.0,
+                            total_events: 777,
+                            last_kind: collect::hot_files::ActivityKind::Modified,
+                            last_seen: Instant::now(),
+                            history: Default::default(),
+                            pushed: 0,
+                        },
+                    );
+                }
+            }
+            let mut term = Terminal::new(TestBackend::new(170, 44)).expect("terminal");
+            let frame = term.draw(|f| super::draw(f, &mut app)).expect("draw");
+            let buf = frame.buffer;
+            let area = buf.area;
+            names
+                .iter()
+                .map(|n| {
+                    let stem = &n[..n.len() - 4];
+                    let tail: String = stem
+                        .chars()
+                        .rev()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    (0..area.height).find_map(|y| {
+                        // A wide character's second cell is blank; skip it.
+                        let mut line = String::new();
+                        let mut x = 0;
+                        while x < area.width {
+                            let sym = buf[(x, y)].symbol();
+                            line.push_str(sym);
+                            x += unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                        }
+                        if !line.contains(&tail) {
+                            return None;
+                        }
+                        (0..area.width.saturating_sub(3))
+                            .find(|&x| (0..3).all(|i| buf[(x + i, y)].symbol() == "7"))
+                    })
+                })
+                .collect()
+        };
+        for view in [ViewMode::Full, ViewMode::Dense] {
+            let cols = column_of_777(view);
+            assert!(
+                cols.iter().all(|c| c.is_some()),
+                "{view:?}: every row drawn with its total: {cols:?}"
+            );
+            assert!(
+                cols.windows(2).all(|w| w[0] == w[1]),
+                "{view:?}: totals at {cols:?}"
             );
         }
     }

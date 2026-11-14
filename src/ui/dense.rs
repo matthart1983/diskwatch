@@ -1335,10 +1335,7 @@ fn devices_box(buf: &mut Buffer, area: Rect, app: &App, s: &Sys) {
 /// goes through this: a long device name or mount point must lose its own tail
 /// rather than overwrite the field beside it.
 fn clamp(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    s.chars().take(n).collect()
+    crate::ui::format::take_cells(s, n).0
 }
 
 // ── latency box ────────────────────────────────────────────────────────────
@@ -1397,12 +1394,11 @@ fn latency_box(buf: &mut Buffer, area: Rect, s: &Sys) {
 
     let total: u64 = s.hist.iter().sum();
     let max = s.hist.iter().copied().max().unwrap_or(1).max(1);
-    for i in 0..LAT_BUCKETS {
+    for (i, &n) in s.hist.iter().enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height - 2 {
             break;
         }
-        let n = s.hist[i];
         // Colour comes from the bucket's POSITION, not its count: the
         // right-hand buckets are red even when nearly empty, so you can see
         // where the tail would appear before it does.
@@ -1688,11 +1684,10 @@ fn volumes_box(buf: &mut Buffer, area: Rect, app: &App) {
 /// Keep the tail of a path when it doesn't fit — `/very/long/…/target` reads
 /// better as its last components, since the leading ones are usually shared.
 fn tail_path(s: &str, n: usize) -> String {
-    let len = s.chars().count();
-    if len <= n {
+    if crate::ui::format::cells(s) <= n {
         return s.to_string();
     }
-    let keep: String = s.chars().skip(len - (n - 1)).collect();
+    let (keep, _) = crate::ui::format::take_cells_end(s, n.saturating_sub(1));
     format!("…{keep}")
 }
 

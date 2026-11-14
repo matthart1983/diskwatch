@@ -79,18 +79,19 @@ impl ProcessTick {
     /// The pid survives clipping and the name gives way: the pid is what
     /// you type into `kill`, and it is the shorter half.
     pub fn label(&self, width: usize) -> String {
+        use crate::ui::format::{cells, take_cells};
         let full = format!("{} ({})", self.name, self.pid);
-        if full.chars().count() <= width {
+        if cells(&full) <= width {
             return full;
         }
         let pid = format!(" ({})", self.pid);
-        let room = width.saturating_sub(pid.chars().count() + 1);
+        let room = width.saturating_sub(cells(&pid) + 1);
         if room == 0 {
             // Narrower than the pid itself: the name is gone entirely and
             // an ellipsis in front of a bare pid is noise.
             return self.pid.to_string().chars().take(width).collect();
         }
-        let name: String = self.name.chars().take(room).collect();
+        let (name, _) = take_cells(&self.name, room);
         format!("{name}…{pid}")
     }
 }
@@ -183,12 +184,18 @@ impl ProcessCollector {
         if elapsed_secs <= 0.0 {
             return;
         }
+        let me = std::process::id();
         for (pid, proc) in self.sys.processes() {
-            let usage = proc.disk_usage();
-            if usage.read_bytes == 0 && usage.written_bytes == 0 {
+            let pid = pid.as_u32();
+            // diskwatch's own reads, its directory walks and /proc scans,
+            // ranked it the busiest process on its own screen.
+            if pid == me {
                 continue;
             }
-            let pid = pid.as_u32();
+            // Idle processes stay in. One holding a hot file open is still
+            // the answer for that file's PROCESS column; leaving them out
+            // left the column blank on every row.
+            let usage = proc.disk_usage();
             self.procs.insert(
                 pid,
                 ProcessTick {
@@ -234,7 +241,12 @@ impl ProcessCollector {
     /// short-lived writer, so the tab shows it alongside the per-path
     /// column rather than instead of it.
     pub fn top(&self, n: usize) -> Vec<ProcessTick> {
-        let mut v: Vec<ProcessTick> = self.procs.values().cloned().collect();
+        let mut v: Vec<ProcessTick> = self
+            .procs
+            .values()
+            .filter(|p| p.total_bps() > 0.0)
+            .cloned()
+            .collect();
         v.sort_by(|a, b| {
             b.total_bps()
                 .partial_cmp(&a.total_bps())
@@ -697,10 +709,10 @@ mod tests {
             .expect("our open file should be in the reverse index");
 
         let owners = c.owners_of(&indexed);
-        // `procs` only carries processes that moved bytes this interval,
-        // and the first refresh has no interval to difference against, so
-        // the join can legitimately be empty here. The index is the part
-        // under test; that it contains our pid is the claim.
+        // `procs` leaves diskwatch itself out, and the first refresh has no
+        // interval to difference against, so the join is empty here. The
+        // index is the part under test; that it contains our pid is the
+        // claim.
         assert!(
             c.owners[&indexed].contains(&std::process::id()),
             "expected our pid among {:?}",
@@ -716,6 +728,20 @@ mod tests {
     /// The first refresh has no previous sample, and sysinfo reports
     /// lifetime totals as that delta. Publishing it would pin whatever
     /// has written most since boot to the top of the table permanently.
+    /// The live path, not a seeded one: after a real refresh an idle
+    /// process is in the table, so it can be named as a holder, and
+    /// diskwatch itself is not.
+    #[test]
+    fn a_real_refresh_keeps_idle_processes_and_leaves_out_diskwatch() {
+        let mut c = ProcessCollector::new();
+        c.refresh_rates(0.0);
+        c.refresh_rates(1.0);
+        assert!(!c.procs.contains_key(&std::process::id()));
+        let idle = c.procs.values().filter(|p| p.total_bps() == 0.0).count();
+        assert!(idle > 0, "some process on this machine did no IO");
+        assert!(c.top(usize::MAX).iter().all(|p| p.total_bps() > 0.0));
+    }
+
     #[test]
     fn the_first_refresh_publishes_no_rates() {
         let mut c = ProcessCollector::new();

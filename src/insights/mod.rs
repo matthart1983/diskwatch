@@ -83,15 +83,7 @@ pub fn evaluate(
         out.push(i);
     }
     if out.is_empty() {
-        out.push(Insight {
-            sev: Severity::Info,
-            title: "All systems nominal".into(),
-            body: vec![
-                "No filesystems above 80% capacity.".into(),
-                "No SMART warnings on attached devices.".into(),
-            ],
-            suggested_tab: "",
-        });
+        out.push(all_clear(devices, smart));
     }
     // Stable ordering: crit > warn > info.
     out.sort_by_key(|i| match i.sev {
@@ -373,12 +365,75 @@ fn drive_temperature_high(smart: &SmartCollector) -> Option<Insight> {
     })
 }
 
+/// What to say when nothing fired. "All systems nominal" only when SMART
+/// was read for every disk: without root it isn't, and saying nominal beside
+/// a HEALTH card reading "unknown" claimed a check that never ran.
+fn all_clear(devices: &[DeviceTick], smart: &SmartCollector) -> Insight {
+    let unread: Vec<&DeviceTick> = devices
+        .iter()
+        .filter(|d| !crate::collect::devices::is_memory_backed(&d.name))
+        .filter(|d| !smart_was_read(d, smart))
+        .collect();
+    if unread.is_empty() {
+        return Insight {
+            sev: Severity::Info,
+            title: "All systems nominal".into(),
+            body: vec![
+                "No filesystems above 80% capacity.".into(),
+                "No SMART warnings on attached devices.".into(),
+            ],
+            suggested_tab: "",
+        };
+    }
+    let names: Vec<&str> = unread.iter().map(|d| d.name.as_str()).collect();
+    let asleep = |d: &&DeviceTick| smart.by_device.get(&d.name).is_some_and(|t| t.standby);
+    let why = if unread.iter().any(|d| smart.needs_root(&d.name)) {
+        "smartctl needs root (sudo diskwatch)"
+    } else if unread.iter().all(asleep) {
+        "asleep, and not woken to read it"
+    } else if !smart.smartctl_available() && unread.iter().all(|d| d.smart_ok.is_none()) {
+        "smartctl isn't installed"
+    } else {
+        "no SMART data came back"
+    };
+    Insight {
+        sev: Severity::Info,
+        title: "No problems found, but SMART wasn't read".into(),
+        body: vec![
+            "No filesystems above 80% capacity.".into(),
+            format!("No SMART reading for {}: {why}.", names.join(", ")),
+        ],
+        suggested_tab: "smart",
+    }
+}
+
+/// Whether diskwatch has any SMART reading for `d`: a health verdict (macOS,
+/// Windows) or smartctl data (Linux).
+fn smart_was_read(d: &DeviceTick, smart: &SmartCollector) -> bool {
+    d.smart_ok.is_some()
+        || smart
+            .by_device
+            .get(&d.name)
+            .is_some_and(|t| !t.needs_root && crate::tabs::smart::has_reading(t))
+}
+
 fn io_dominant_device(io: &[IoTick]) -> Option<Insight> {
-    let total: f64 = io.iter().map(|t| t.bps).sum();
+    // Physical disks only. zram is swap, which is memory traffic, and a
+    // stacked device (dm, md) carries the same blocks as the disk under it,
+    // so either one made a single disk look dominant. With one disk left
+    // there's nothing for it to dominate.
+    let disks: Vec<&IoTick> = io
+        .iter()
+        .filter(|t| crate::collect::io::is_summed(&t.device))
+        .collect();
+    if disks.len() < 2 {
+        return None;
+    }
+    let total: f64 = disks.iter().map(|t| t.bps).sum();
     if total < 1_000_000.0 {
         return None; // Don't fire on idle hosts.
     }
-    let dominant = io.iter().max_by(|a, b| {
+    let dominant = disks.iter().max_by(|a, b| {
         a.bps
             .partial_cmp(&b.bps)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -392,7 +447,7 @@ fn io_dominant_device(io: &[IoTick]) -> Option<Insight> {
         sev: Severity::Info,
         title: format!("{} is dominating disk IO", dominant.device),
         body: vec![format!(
-            "{:.1} MB/s — {:.0}% of total host IO",
+            "{:.1} MB/s — {:.0}% of IO across the disks",
             mb,
             share * 100.0
         )],
@@ -508,6 +563,76 @@ fn used_pct(m: &FsTick) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn io(device: &str, bps: f64) -> IoTick {
+        IoTick {
+            device: device.into(),
+            bps,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dominating_needs_two_physical_disks() {
+        // The plan review's two misreads: zram, and a one-disk host.
+        assert!(io_dominant_device(&[io("zram0", 158.8e6), io("nvme0n1", 2e6)]).is_none());
+        assert!(io_dominant_device(&[io("nvme0n1", 17.5e6)]).is_none());
+        // LUKS: dm-0 carries the same blocks as the disk under it.
+        assert!(io_dominant_device(&[io("nvme0n1", 20e6), io("dm-0", 20e6)]).is_none());
+        let two = io_dominant_device(&[io("nvme0n1", 90e6), io("sda", 5e6)]).unwrap();
+        assert_eq!(two.title, "nvme0n1 is dominating disk IO");
+    }
+
+    fn device(name: &str, smart_ok: Option<bool>) -> DeviceTick {
+        DeviceTick {
+            name: name.into(),
+            kind: crate::collect::devices::DeviceKind::Nvme,
+            model: String::new(),
+            bus: String::new(),
+            size_bytes: 0,
+            used_bytes: 0,
+            is_removable: false,
+            firmware: None,
+            serial: None,
+            smart_ok,
+            idle: false,
+        }
+    }
+
+    #[test]
+    fn nominal_only_when_smart_was_read() {
+        let mut smart = SmartCollector::new();
+        smart.by_device.insert(
+            "nvme0n1".into(),
+            crate::collect::smart::SmartTick {
+                needs_root: true,
+                ..Default::default()
+            },
+        );
+        let devices = [device("nvme0n1", None), device("zram0", None)];
+        let refused = all_clear(&devices, &smart);
+        assert_ne!(refused.title, "All systems nominal");
+        assert!(refused.body[1].contains("nvme0n1"), "{:?}", refused.body);
+        assert!(refused.body[1].contains("sudo"), "{:?}", refused.body);
+        assert!(
+            !refused.body[1].contains("zram0"),
+            "zram has no SMART to read"
+        );
+
+        smart.by_device.insert(
+            "nvme0n1".into(),
+            crate::collect::smart::SmartTick {
+                temperature_c: Some(41),
+                ..Default::default()
+            },
+        );
+        assert_eq!(all_clear(&devices, &smart).title, "All systems nominal");
+        // macOS and Windows carry a verdict on the device instead.
+        assert_eq!(
+            all_clear(&[device("disk0", Some(true))], &SmartCollector::new()).title,
+            "All systems nominal"
+        );
+    }
 
     #[test]
     fn a_mount_that_does_not_answer_is_named() {

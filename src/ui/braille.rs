@@ -155,8 +155,20 @@ impl Ramp {
 pub fn text(buf: &mut Buffer, x: u16, y: u16, s: &str, fg: Color, bold: bool) -> u16 {
     let area = buf.area;
     let mut cx = x;
+    let mut last: Option<u16> = None;
     for ch in s.chars() {
-        if cx >= area.right() || y >= area.bottom() {
+        let w = crate::ui::format::char_cells(ch) as u16;
+        // A combining mark belongs to the character before it.
+        if w == 0 {
+            if let Some(cell) = last.and_then(|lx| buf.cell_mut((lx, y))) {
+                let joined = format!("{}{ch}", cell.symbol());
+                cell.set_symbol(&joined);
+            }
+            continue;
+        }
+        // A wide character takes two cells, and one that would straddle
+        // the edge isn't drawn at all.
+        if cx.saturating_add(w) > area.right() || y >= area.bottom() {
             break;
         }
         if cx >= area.x && y >= area.y {
@@ -166,15 +178,23 @@ pub fn text(buf: &mut Buffer, x: u16, y: u16, s: &str, fg: Color, bold: bool) ->
                     cell.set_style(Style::default().add_modifier(Modifier::BOLD));
                 }
             }
+            // The cell it covers is reset, as ratatui does; the next
+            // character starts after it rather than overwriting it.
+            for i in 1..w {
+                if let Some(cell) = buf.cell_mut((cx + i, y)) {
+                    cell.reset();
+                }
+            }
+            last = Some(cx);
         }
-        cx = cx.saturating_add(1);
+        cx = cx.saturating_add(w);
     }
     cx
 }
 
 /// Draw `s` so that it ENDS at column `x_end`.
 pub fn text_right(buf: &mut Buffer, x_end: u16, y: u16, s: &str, fg: Color, bold: bool) {
-    let w = s.chars().count() as u16;
+    let w = crate::ui::format::cells(s) as u16;
     let x = x_end.saturating_sub(w.saturating_sub(1));
     text(buf, x, y, s, fg, bold);
 }

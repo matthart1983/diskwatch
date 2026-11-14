@@ -41,6 +41,9 @@ fn draw_device_picker(f: &mut Frame, area: Rect, app: &App) {
             Some(true) => ("ok", p::green()),
             Some(false) => ("FAIL", p::red()),
             None if app.smart.needs_root(&d.name) => ("needs root", p::dim()),
+            None if app.smart.by_device.get(&d.name).is_some_and(|t| t.standby) => {
+                ("standby", p::dim())
+            }
             None => ("—", p::dim()),
         };
         let label = format!("{} {}", d.name, badge.0);
@@ -79,11 +82,19 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
     let Some(d) = app.devices.get(app.selected_device) else {
         return;
     };
+    // A sleeping disk isn't woken to read it, so what's below is the
+    // reading from before it went to sleep, if there was one.
+    let asleep = app.smart.by_device.get(&d.name).is_some_and(|t| t.standby);
+    let title = if asleep {
+        format!(" {}  SMART · standby, not woken ", d.name)
+    } else {
+        format!(" {}  SMART ", d.name)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p::faint()).bg(p::bg()))
         .title(Span::styled(
-            format!(" {}  SMART ", d.name),
+            title,
             Style::default().fg(p::cyan()).add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(p::bg()));
@@ -130,6 +141,21 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    if tick.standby && !has_reading(tick) {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  asleep since diskwatch started, and not woken to read it",
+                    Style::default().fg(p::dim()),
+                )),
+            ])
+            .style(Style::default().bg(p::bg())),
+            split[1],
+        );
+        return;
+    }
+
     // Layout the SMART body: top half always shows the headline summary
     // (temp / hours / cycles / wear — what the Overview page's TEMP
     // column also shows). Bottom half shows the per-protocol detail:
@@ -143,6 +169,14 @@ fn draw_attribute_panel(f: &mut Frame, area: Rect, app: &App) {
     if !tick.ata_attrs.is_empty() {
         draw_ata_table(f, body[1], tick);
     }
+}
+
+/// Whether `tick` holds anything smartctl read.
+pub fn has_reading(tick: &crate::collect::smart::SmartTick) -> bool {
+    tick.temperature_c.is_some()
+        || tick.power_on_hours.is_some()
+        || tick.percentage_used.is_some()
+        || !tick.ata_attrs.is_empty()
 }
 
 fn draw_missing_smartctl_banner(f: &mut Frame, area: Rect, d: &DeviceTick) {

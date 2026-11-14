@@ -1049,7 +1049,9 @@ fn render_capacity(f: &mut Frame, app: &App, l: &Layout, alert: bool) {
         _ if alert => ("check capacity".to_string(), Style::default().fg(p::red())),
         // A status readout, not chrome — never render it on `faint`,
         // which is the lowest-contrast token in every theme.
-        _ => ("all nominal".to_string(), Style::default().fg(p::dim())),
+        // Scoped to what this row checked. "all nominal" here claimed
+        // SMART too, with nothing read.
+        _ => ("capacity ok".to_string(), Style::default().fg(p::dim())),
     };
     // Guard the collision the handoff's fixed layout ignores: a long
     // growth value plus a long projection overruns 78 columns.
