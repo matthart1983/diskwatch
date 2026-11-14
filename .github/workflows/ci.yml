@@ -96,7 +96,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             runner: ""
           - target: aarch64-unknown-linux-musl
-            runner: qemu-aarch64-static
+            runner: qemu-aarch64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,11 +113,14 @@ jobs:
           python3 -m pip install --user ziglang cargo-zigbuild
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      # `qemu-user` on every Ubuntu release. 26.04 turned `qemu-user-static`
+      # into a virtual package apt won't install, and `qemu-aarch64` is
+      # there either way.
       - name: Install qemu
         if: matrix.runner != ''
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq qemu-user-static
+          sudo apt-get install -yq qemu-user
 
       - name: Build
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}
