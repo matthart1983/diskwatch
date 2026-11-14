@@ -10,7 +10,8 @@ One line per PR, in order, each with the check that closes it.
 - [x] P04 Hot Files stops counting its own install walk and itself, and names idle holders in PROCESS. A quiet 110-directory tree shows 0 events
 - [x] P05 No "nominal" without SMART evidence. The disk-I/O insight skips zram, and "dominating" needs more than one disk
 - [x] P06 Width-aware rows in Dense and Hot. CJK and emoji names keep the columns aligned
-- [ ] P07 `smartctl -n standby`: show "standby" and keep the last values. An HDD owner confirms it doesn't wake the disk
+- [x] P07 `smartctl -n standby`: show "standby" and keep the last values
+- [ ] An HDD owner confirms P07 doesn't wake the disk
 - [ ] P08 Remove the Homebrew tap job and revoke `HOMEBREW_TAP_TOKEN`. README: `sudo` and `$HOME`, `secure_path`. Re-check the mid-session dead-mount note first: on 0.7.1 a mount dying under a running TUI no longer blocks it on Linux
 - [ ] Owner check: a real disk-backed writer shows in Hot Files, and the docs match what it shows
 - [ ] Listing: awesome-tuis PRs for diskwatch and netwatch, the awesome-rust link, an NFS issue and a help-wanted Windows NVMe issue

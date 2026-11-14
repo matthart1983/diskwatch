@@ -32,6 +32,23 @@ pub struct SmartTick {
     /// smartctl was refused the device for lack of privilege, so every
     /// field above is empty because of permissions, not the drive.
     pub needs_root: bool,
+    /// The last poll found the disk asleep and left it that way. The fields
+    /// above are from the poll before, if there was one.
+    pub standby: bool,
+}
+
+/// The exit status smartctl is told to use when it finds a disk asleep
+/// (`-n standby,3`). Its default, 2, also means the device couldn't be
+/// opened. 3 can't happen otherwise: it would mean a bad command line and
+/// a failed open together, and a bad command line stops before the open.
+const STANDBY_EXIT: i32 = 3;
+
+/// What one poll of one device came back with.
+#[derive(Debug)]
+enum Poll {
+    Read(SmartTick),
+    Standby,
+    Failed,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,13 +129,7 @@ impl SmartCollector {
         if !matches!(self.have_smartctl, Some(true)) {
             return;
         }
-        self.last_refresh = Instant::now();
-        self.last_refresh_at = Some(self.last_refresh);
-        for d in devices {
-            if let Some(tick) = query_device(&d.name) {
-                self.by_device.insert(d.name.clone(), tick);
-            }
-        }
+        self.poll(devices);
     }
 
     /// Called periodically (default 5 min, lowered for live monitoring).
@@ -134,12 +145,35 @@ impl SmartCollector {
         if self.last_refresh.elapsed() < self.interval {
             return;
         }
+        self.poll(devices);
+    }
+
+    fn poll(&mut self, devices: &[crate::collect::DeviceTick]) {
         self.last_refresh = Instant::now();
         self.last_refresh_at = Some(self.last_refresh);
         for d in devices {
-            if let Some(tick) = query_device(&d.name) {
-                self.by_device.insert(d.name.clone(), tick);
+            self.apply(&d.name, query_device(&d.name));
+        }
+    }
+
+    /// A sleeping disk keeps its last reading rather than losing it; the
+    /// tab says it's asleep.
+    fn apply(&mut self, name: &str, poll: Poll) {
+        match poll {
+            Poll::Read(tick) => {
+                self.by_device.insert(name.to_string(), tick);
             }
+            Poll::Standby => {
+                let tick = self
+                    .by_device
+                    .entry(name.to_string())
+                    .or_insert_with(|| SmartTick {
+                        device: name.to_string(),
+                        ..Default::default()
+                    });
+                tick.standby = true;
+            }
+            Poll::Failed => {}
         }
     }
 }
@@ -154,16 +188,31 @@ fn probe_smartctl() -> bool {
     // surfaces the missing-binary state via its own banner.
 }
 
-fn query_device(name: &str) -> Option<SmartTick> {
+fn query_device(name: &str) -> Poll {
     let dev = format!("/dev/{}", name);
-    let out = Command::new("smartctl")
-        .args(["-A", "--json", &dev])
+    // `-n standby`: a disk that has spun down stays down. Polling every
+    // five minutes otherwise woke it every five minutes, the complaint in
+    // Scrutiny #157. ATA and SCSI only; NVMe ignores it.
+    let standby = format!("standby,{STANDBY_EXIT}");
+    match Command::new("smartctl")
+        .args(["-n", &standby, "-A", "--json", &dev])
         .output()
-        .ok()?;
+    {
+        Ok(out) => classify(name, out.status.code(), &out.stdout),
+        Err(_) => Poll::Failed,
+    }
+}
+
+fn classify(name: &str, status: Option<i32>, stdout: &[u8]) -> Poll {
+    if status == Some(STANDBY_EXIT) {
+        return Poll::Standby;
+    }
     // smartctl returns nonzero exit on warning-class issues but still
     // emits valid JSON; parse the output regardless of status.
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    Some(parse_smartctl(name, &v))
+    match serde_json::from_slice::<serde_json::Value>(stdout) {
+        Ok(v) => Poll::Read(parse_smartctl(name, &v)),
+        Err(_) => Poll::Failed,
+    }
 }
 
 /// True when smartctl was refused the device for lack of privilege. As a
@@ -299,6 +348,40 @@ fn parse_smartctl(name: &str, v: &serde_json::Value) -> SmartTick {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standby_is_its_own_exit_status_and_keeps_the_last_reading() {
+        // smartctl's default for a sleeping disk, 2, is also "couldn't
+        // open it", so only 3 means asleep.
+        assert!(matches!(classify("sda", Some(3), b""), Poll::Standby));
+        assert!(matches!(
+            classify("sda", Some(2), b"not json"),
+            Poll::Failed
+        ));
+        let mut c = SmartCollector::new();
+        c.apply(
+            "sda",
+            Poll::Read(SmartTick {
+                temperature_c: Some(38),
+                ..Default::default()
+            }),
+        );
+        c.apply("sda", Poll::Standby);
+        let t = &c.by_device["sda"];
+        assert!(t.standby);
+        assert_eq!(t.temperature_c, Some(38), "the last reading is kept");
+        c.apply(
+            "sda",
+            Poll::Read(SmartTick {
+                temperature_c: Some(40),
+                ..Default::default()
+            }),
+        );
+        assert!(!c.by_device["sda"].standby, "awake again");
+        // Asleep from the first poll: a tick that says so, with no reading.
+        c.apply("sdb", Poll::Standby);
+        assert!(c.by_device["sdb"].standby && c.by_device["sdb"].temperature_c.is_none());
+    }
 
     /// `smartctl -A --json /dev/nvme0n1` as a normal user, verbatim from
     /// smartctl 7.5 on Fedora 44.

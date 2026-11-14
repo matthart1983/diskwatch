@@ -45,7 +45,8 @@ builds, plus Linux armv5te and Windows x86_64.
 Install `smartmontools` for full SMART attribute tables. Without it, SMART reporting
 is limited to the basic health flag where available. On Linux smartctl needs root to
 read a drive, so run `sudo diskwatch` for SMART data; otherwise the SMART columns say
-"needs root".
+"needs root". A spun-down hard disk is left asleep (`smartctl -n standby`): the SMART tab
+says "standby" and keeps its last reading.
 
 ## Run
 
