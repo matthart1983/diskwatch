@@ -21,6 +21,14 @@ Changes from 0.7.1 on. Earlier releases are on the
   run now peaks between 37 and 61 MB and falls back to about 20 MB. They use
   mimalloc now. The glibc, macOS and Windows builds keep their system
   allocator.
+- On Linux, Hot Files no longer takes nearly every inotify watch on the
+  machine. Watching `$HOME` recursively took 523,541 of this host's 547,398
+  and about 0.5 GB, which starves editors and sync tools of watches. It now
+  takes at most a quarter of `fs.inotify.max_user_watches`, and no more than
+  65,536 directories, shallowest first across all roots, keeping an eighth
+  for directories made after startup. The Hot Files tab says when a root
+  isn't watched all the way down, and `--diag` shows the limit. The same
+  default run now holds 57,344 watches and 38 MB.
 - Hot Files copies the history of the files on screen only, not of every
   file it tracks, on each frame. With 4,096 busy files, the most it tracks,
   that copying took up to 7.5% of a core.

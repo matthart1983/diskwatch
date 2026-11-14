@@ -405,6 +405,7 @@ impl App {
             // entries. The watcher thread keeps writing into the same
             // map between calls; we just shape it back down.
             self.hot_files.decay(usage_elapsed);
+            self.hot_files.adopt_new_dirs();
             self.host.uptime_secs = System::uptime();
             self.last_usage_refresh = Instant::now();
         }

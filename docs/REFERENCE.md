@@ -233,11 +233,18 @@ diskwatch --watch-add /srv/data              # keep them, add one
 DISKWATCH_WATCH_PATHS=/srv:/var/log diskwatch
 ```
 
-Each root is watched recursively, which on Linux costs one inotify watch per directory
-underneath it. Point it at a large tree and you can exhaust
-`fs.inotify.max_user_watches` — diskwatch names the path and says so rather than
-reporting the kernel's bare "No space left on device", which sends people looking at
-`df`. A root that doesn't exist is named too, and doesn't stop the others being watched.
+On macOS and Windows each root is watched whole. On Linux every directory needs an inotify
+watch of its own, from a per-user pool (`fs.inotify.max_user_watches`) that editors, IDEs
+and sync tools share. diskwatch takes at most a quarter of that pool, and never more than
+65,536 directories. It walks all the roots together, level by level, so the top of each
+root is watched before the depths of any one. An eighth of the budget is kept for
+directories made after startup. When the limit stops it short, the Hot Files tab says which
+roots aren't watched all the way down, and `--diag` shows the numbers. Unreadable
+directories are skipped and counted rather than failing the root.
+
+If the pool itself runs out, diskwatch names the path and says so rather than reporting the
+kernel's bare "No space left on device", which sends people looking at `df`. A root that
+doesn't exist is named too, and doesn't stop the others being watched.
 
 ## What's real, what's deferred
 

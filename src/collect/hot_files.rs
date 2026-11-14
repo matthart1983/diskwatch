@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use notify::event::CreateKind;
 use notify::{
     event::{EventKind, ModifyKind},
     RecursiveMode, Watcher,
@@ -40,6 +42,17 @@ const PRUNE_IDLE: Duration = Duration::from_secs(30);
 
 /// Soft cap on tracked paths. Beyond this we prune by age.
 const MAX_TRACKED: usize = 4096;
+
+/// Most directories Hot Files watches on Linux, whatever the system allows.
+/// Each costs an inotify watch and about 1 KB of memory between the kernel
+/// and notify. A recursive watch of a developer's $HOME took 523,541 of the
+/// host's 547,398 watches, and about 0.5 GB.
+#[cfg(target_os = "linux")]
+pub const WATCH_CAP: usize = 65_536;
+
+/// Directories created since install that wait for a watch, at most.
+#[cfg(target_os = "linux")]
+const NEW_DIR_QUEUE: usize = 4096;
 
 /// Per-path rate history, in 1 Hz samples. Long enough to fill the Lite
 /// row sparkline on a wide terminal; the sparkline buckets whatever it
@@ -111,6 +124,21 @@ pub struct HotFileState {
     /// are not known yet, so the tabs say "installing" instead of
     /// claiming roots that may not exist.
     pub installing: bool,
+    /// Linux: directories with a watch of their own, and how many more
+    /// the budget allows.
+    #[cfg(target_os = "linux")]
+    pub watched_dirs: usize,
+    #[cfg(target_os = "linux")]
+    pub watch_budget: usize,
+    #[cfg(target_os = "linux")]
+    pub watch_budget_left: usize,
+    /// What the watch budget left out, when it left anything out. Not an
+    /// error: the roots are watched, just not all the way down.
+    pub limit_note: Option<String>,
+    /// Linux: directories created under a watched one since install,
+    /// waiting for [`HotFileWatcher::adopt_new_dirs`].
+    #[cfg(target_os = "linux")]
+    pub new_dirs: Vec<PathBuf>,
 }
 
 impl HotFileState {
@@ -434,6 +462,63 @@ impl HotFileWatcher {
     pub fn active_count(&self) -> usize {
         self.state.lock().unwrap().activity.len()
     }
+
+    /// What the watch budget left out, if anything.
+    pub fn limit_note(&self) -> Option<String> {
+        self.state.lock().ok()?.limit_note.clone()
+    }
+
+    /// Watch directories created since install, while the budget lasts.
+    /// notify's recursive mode used to; with a watch per directory it falls
+    /// to us. The App calls this from its tick. Elsewhere watches are
+    /// recursive, and this does nothing.
+    pub fn adopt_new_dirs(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            let (dirs, left) = {
+                let Ok(mut s) = self.state.lock() else { return };
+                if s.new_dirs.is_empty() {
+                    return;
+                }
+                let dirs = std::mem::take(&mut s.new_dirs);
+                if s.watch_budget_left == 0 {
+                    s.limit_note = Some(format!(
+                        "{} directories watched, the limit; new ones aren't (see --diag)",
+                        s.watched_dirs
+                    ));
+                    return;
+                }
+                (dirs, s.watch_budget_left)
+            };
+            // The state lock is free from here until the end: on inotify,
+            // watch() waits on the thread that runs the event callback, and
+            // the callback needs that lock.
+            let Ok(mut guard) = self._watcher.try_lock() else {
+                return;
+            };
+            let Some(watcher) = guard.as_mut() else {
+                return;
+            };
+            let plan = plan_watches(&dirs, left, &AtomicBool::new(false));
+            let mut added = 0;
+            for d in plan.dirs.iter().flatten() {
+                if watcher.watch(d, RecursiveMode::NonRecursive).is_ok() {
+                    added += 1;
+                }
+            }
+            drop(guard);
+            if let Ok(mut s) = self.state.lock() {
+                s.watched_dirs += added;
+                s.watch_budget_left = s.watch_budget_left.saturating_sub(added);
+                if plan.cut.iter().any(|c| *c) {
+                    s.limit_note = Some(format!(
+                        "{} directories watched, the limit; new ones aren't (see --diag)",
+                        s.watched_dirs
+                    ));
+                }
+            }
+        }
+    }
 }
 
 impl Drop for HotFileWatcher {
@@ -611,6 +696,15 @@ fn install(
             // notify can emit multiple paths per event (e.g. rename). We
             // record each path once.
             let Ok(mut s) = state_w.lock() else { return };
+            // Each directory has its own watch on Linux, so new ones need
+            // one too. A removed one doesn't credit the budget back: the
+            // same event comes for directories past the cap that never had
+            // a watch, and crediting those let the count creep over it.
+            #[cfg(target_os = "linux")]
+            if let EventKind::Create(CreateKind::Folder) = event.kind {
+                let room = NEW_DIR_QUEUE.saturating_sub(s.new_dirs.len());
+                s.new_dirs.extend(event.paths.iter().take(room).cloned());
+            }
             for p in event.paths {
                 s.record(p, kind);
             }
@@ -639,7 +733,19 @@ fn install(
     // exotic one, so collect every failure and report them together.
     let mut errors: Vec<String> = Vec::new();
     let mut watched: Vec<PathBuf> = Vec::new();
-    for r in roots {
+    // Linux: choose every directory to watch before watching any, breadth
+    // first across all roots, so the budget goes to the shallow parts of
+    // each root before the depths of one, and the walk's own reads happen
+    // while nothing is listening.
+    #[cfg(target_os = "linux")]
+    let (budget, _) = watch_budget();
+    // An eighth stays back for directories made after startup.
+    #[cfg(target_os = "linux")]
+    let plan = plan_watches(roots, budget - budget / 8, stop);
+    #[cfg(target_os = "linux")]
+    let mut watched_dirs = 0usize;
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_enumerate_index))]
+    for (_i, r) in roots.iter().enumerate() {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
@@ -647,6 +753,32 @@ fn install(
             errors.push(format!("{}: no such path", r.display()));
             continue;
         }
+        #[cfg(target_os = "linux")]
+        {
+            let (n, err) = watch_planned(&mut watcher, &plan.dirs[_i], stop);
+            watched_dirs += n;
+            if n > 0 {
+                watched.push(r.clone());
+            }
+            let unreadable = &plan.unreadable[_i];
+            if let Some(e) = err {
+                errors.push(describe_watch_error(r, &e));
+            } else if n == 0 && unreadable.first() == Some(r) {
+                errors.push(format!(
+                    "{}: can't read it, so nothing in it is watched",
+                    r.display()
+                ));
+            } else if let Some(first) = unreadable.first() {
+                errors.push(format!(
+                    "{}: {} unreadable director{} not watched (e.g. {})",
+                    r.display(),
+                    unreadable.len(),
+                    if unreadable.len() == 1 { "y" } else { "ies" },
+                    first.display()
+                ));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
         match watcher.watch(r, RecursiveMode::Recursive) {
             Ok(()) => watched.push(r.clone()),
             // `notify` abandons a whole recursive root at the first
@@ -714,9 +846,127 @@ fn install(
         if !errors.is_empty() {
             s.error = Some(errors.join("; "));
         }
+        #[cfg(target_os = "linux")]
+        {
+            s.watched_dirs = watched_dirs;
+            s.watch_budget = budget;
+            s.watch_budget_left = budget.saturating_sub(watched_dirs);
+            let cut: Vec<String> = roots
+                .iter()
+                .zip(&plan.cut)
+                .filter(|(_, cut)| **cut)
+                .map(|(r, _)| r.display().to_string())
+                .collect();
+            if !cut.is_empty() {
+                s.limit_note = Some(limit_note(watched_dirs, &cut));
+            }
+        }
     }
 
     Some(watcher)
+}
+
+/// How many directories Hot Files watches on Linux, and the system limit
+/// it was taken from. Every inotify watch comes out of one per-user pool,
+/// `fs.inotify.max_user_watches`, which editors, IDEs and file sync share,
+/// so take a quarter of it and never more than [`WATCH_CAP`]. An unreadable
+/// limit counts as 8,192, the old kernel default.
+#[cfg(target_os = "linux")]
+pub fn watch_budget() -> (usize, Option<usize>) {
+    let max = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok());
+    ((max.unwrap_or(8192) / 4).clamp(1, WATCH_CAP), max)
+}
+
+#[cfg(target_os = "linux")]
+fn limit_note(watched: usize, cut: &[String]) -> String {
+    format!(
+        "{watched} directories watched, the limit; deeper ones under {} aren't (see --diag)",
+        cut.join(", ")
+    )
+}
+
+/// The directories a breadth-first walk chose to watch, per root, and what
+/// it left out.
+#[cfg(target_os = "linux")]
+struct WatchPlan {
+    dirs: Vec<Vec<PathBuf>>,
+    unreadable: Vec<Vec<PathBuf>>,
+    /// The root had directories the budget didn't reach.
+    cut: Vec<bool>,
+}
+
+/// Walk all `roots` together, level by level, choosing up to `budget`
+/// directories to watch. Reads directories and watches none. Never follows
+/// symlinks. A root that is a file is watched as itself.
+#[cfg(target_os = "linux")]
+fn plan_watches(roots: &[PathBuf], budget: usize, stop: &AtomicBool) -> WatchPlan {
+    let n = roots.len();
+    let mut plan = WatchPlan {
+        dirs: vec![Vec::new(); n],
+        unreadable: vec![Vec::new(); n],
+        cut: vec![false; n],
+    };
+    let mut queue: VecDeque<(usize, PathBuf)> = VecDeque::new();
+    let mut chosen = 0usize;
+    for (i, r) in roots.iter().enumerate() {
+        if r.is_dir() {
+            queue.push_back((i, r.clone()));
+        } else if r.exists() && chosen < budget {
+            plan.dirs[i].push(r.clone());
+            chosen += 1;
+        }
+    }
+    while let Some((i, dir)) = queue.pop_front() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => {
+                plan.unreadable[i].push(dir);
+                continue;
+            }
+        };
+        plan.dirs[i].push(dir);
+        chosen += 1;
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                // Queued directories are promised a place, which keeps the
+                // queue no longer than the budget.
+                if chosen + queue.len() >= budget {
+                    plan.cut[i] = true;
+                } else {
+                    queue.push_back((i, entry.path()));
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// Watch each planned directory on its own. Returns how many were watched,
+/// and the error that stopped it if the system ran out of watches. A
+/// directory that vanished since the plan is skipped.
+#[cfg(target_os = "linux")]
+fn watch_planned(
+    watcher: &mut impl Watcher,
+    dirs: &[PathBuf],
+    stop: &AtomicBool,
+) -> (usize, Option<notify::Error>) {
+    let mut n = 0;
+    for d in dirs {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match watcher.watch(d, RecursiveMode::NonRecursive) {
+            Ok(()) => n += 1,
+            Err(e) if matches!(e.kind, notify::ErrorKind::MaxFilesWatch) => return (n, Some(e)),
+            Err(_) => {}
+        }
+    }
+    (n, None)
 }
 
 /// Sensible default roots that show real user activity without drowning
@@ -758,6 +1008,8 @@ pub fn default_roots() -> Vec<PathBuf> {
 /// True when a recursive watch of `root` failed because a directory
 /// *underneath* it couldn't be read — the case [`watch_readable_tree`]
 /// can recover from. Out-of-watches and a bad root itself can't be.
+// Elsewhere only: Linux plans its own walk and never watches recursively.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn is_unreadable_descendant(root: &Path, e: &notify::Error) -> bool {
     matches!(&e.kind, notify::ErrorKind::Io(io)
         if io.kind() == std::io::ErrorKind::PermissionDenied)
@@ -771,6 +1023,7 @@ fn is_unreadable_descendant(root: &Path, e: &notify::Error) -> bool {
 /// Unlike a recursive watch this does not pick up directories created
 /// after startup, which is the price of not losing the whole root to one
 /// unreadable directory.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn watch_readable_tree(watcher: &mut impl Watcher, root: &Path, stop: &AtomicBool) -> Vec<PathBuf> {
     let mut skipped = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -900,6 +1153,118 @@ pub fn resolve_roots(replace: Option<Vec<PathBuf>>, extra: &[PathBuf]) -> Vec<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh tree under the temp dir: `spec` lists directories to create.
+    #[cfg(target_os = "linux")]
+    fn tree(name: &str, spec: &[&str]) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("diskwatch-plan-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in spec {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_plan_shares_the_budget_breadth_first_across_roots() {
+        let deep = tree("deep", &["a/b/c/d/e", "a/b2", "x/y"]);
+        let small = tree("small", &["one"]);
+        let roots = vec![deep.clone(), small.clone()];
+        let stop = AtomicBool::new(false);
+
+        let all = plan_watches(&roots, 1000, &stop);
+        assert_eq!(all.dirs[0].len(), 9, "{:?}", all.dirs[0]);
+        assert_eq!(all.dirs[1].len(), 2);
+        assert!(!all.cut[0] && !all.cut[1]);
+
+        // Five places: both roots and the whole first level of each come
+        // before anything deeper in the big one.
+        let five = plan_watches(&roots, 5, &stop);
+        let chosen: Vec<_> = five.dirs.iter().flatten().collect();
+        assert_eq!(chosen.len(), 5, "{chosen:?}");
+        assert!(five.dirs[1].contains(&small.join("one")), "{chosen:?}");
+        assert!(five.cut[0], "the deep root was cut short");
+        assert!(!five.cut[1], "the small one fit");
+        assert!(!five.dirs[0].contains(&deep.join("a/b")), "{chosen:?}");
+
+        let _ = std::fs::remove_dir_all(&deep);
+        let _ = std::fs::remove_dir_all(&small);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_plan_skips_unreadable_directories_and_takes_files_as_they_are() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tree("locked", &["open", "locked/inner"]);
+        let file = root.join("plain.log");
+        std::fs::write(&file, "x").unwrap();
+        let locked = root.join("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let as_root = std::fs::read_dir(&locked).is_ok();
+        let plan = plan_watches(&[root.clone(), file.clone()], 100, &AtomicBool::new(false));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        if as_root {
+            return;
+        }
+        assert_eq!(plan.unreadable[0], vec![locked]);
+        assert!(plan.dirs[0].contains(&root.join("open")));
+        assert_eq!(plan.dirs[1], vec![file], "a file root is watched as itself");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_watches_each_directory_and_records_the_budget() {
+        let root = tree("install", &["a/b", "c"]);
+        let w = HotFileWatcher::start_background(&[root.as_path()]);
+        w.wait();
+        let s = w.state.lock().unwrap();
+        assert_eq!(s.watch_roots, vec![root.clone()]);
+        assert_eq!(s.watched_dirs, 4, "root, a, a/b and c");
+        assert_eq!(s.watch_budget_left, s.watch_budget - 4);
+        assert!(s.limit_note.is_none());
+        assert!(s.error.is_none(), "{:?}", s.error);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_made_after_install_gets_watched() {
+        let root = tree("adopt", &[]);
+        let w = HotFileWatcher::start_background(&[root.as_path()]);
+        w.wait();
+        std::fs::create_dir_all(root.join("new/inner")).unwrap();
+        // The create event arrives on notify's thread; wait for it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while w.state.lock().unwrap().new_dirs.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        w.adopt_new_dirs();
+        let watched = w.state.lock().unwrap().watched_dirs;
+        assert_eq!(watched, 3, "root, new and new/inner");
+        // A file written in the adopted directory is now seen.
+        std::fs::write(root.join("new/inner/f.log"), "x").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let seen = loop {
+            let hit = w
+                .state
+                .lock()
+                .unwrap()
+                .activity
+                .contains_key(&root.join("new/inner/f.log"));
+            if hit || Instant::now() > deadline {
+                break hit;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        drop(w);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(seen, "an event in a directory made after install");
+    }
 
     #[test]
     fn top_returns_the_busiest_n_in_rank_order() {
