@@ -439,10 +439,10 @@ fn draw_io_sparkline(f: &mut Frame, area: Rect, app: &App) {
         },
     );
 
-    // Aggregate chart across all devices. One cell per sample, with a
-    // baseline filling any leading cells that don't yet have data
-    // (rather than upsampling or padding zeros). Routed through the
-    // graph module so it follows the app-wide bars/dots setting.
+    // Aggregate chart across all devices, with a baseline filling any
+    // leading cells that don't yet have data (rather than upsampling).
+    // Routed through the graph module so it follows the app-wide
+    // bars/dots and fade settings.
     let buckets = aggregate_history(app);
     graph::render(
         f.buffer_mut(),

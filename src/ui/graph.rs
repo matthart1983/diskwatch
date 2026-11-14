@@ -3,40 +3,53 @@
 //! Mirrors [`crate::ui::theme`]: a `GraphStyle` enum with a `by_name`
 //! lookup and a process-wide `ACTIVE` cell, plus a `render` entry point
 //! that dispatches to a per-style implementation. Every chart in the UI —
-//! the Overview aggregate sparkline, the IO tab's per-device lines, and
-//! both Lite charts plus its row sparklines — routes through here, so one
+//! the Overview aggregate chart, the IO tab's per-device chart, and both
+//! Lite charts plus its row sparklines — routes through here, so one
 //! setting toggles them all.
 //!
-//! Ported from netwatch's `graph.rs` so the two tools' `dots` style is
-//! pixel-identical; the series type is `f64` here because every diskwatch
-//! history is a rate, not a count.
+//! Ported from netwatch's `graph.rs`, so the two tools draw the same
+//! graph; the series type is `f64` here because every diskwatch history is
+//! a rate, not a count.
 //!
 //! ## Styles
-//! - `bars` — the stacked eighth-block look diskwatch shipped with.
-//! - `dots` — btop-style braille area plot. Each column fills from the
-//!   bottom to the sample's height in braille pixels, giving 4× the
-//!   vertical resolution of `bars` at the same cell height.
+//! - `dots` — the default. A braille area plot: two samples per cell
+//!   column and four pixel rows per cell, so a graph carries twice the
+//!   history of `bars` at four times the vertical resolution.
+//! - `bars` — stacked eighth blocks, for fonts with no braille.
 //!
-//! `GraphOpts.fade` adds btop's other half: a right-bright / left-dim
-//! gradient across each chart plus a faint dot grid behind the data. It is
-//! a separate toggle from the style because the gradient is legible under
-//! `bars` too, and because `terminal`-theme users need it off.
+//! ## Fade
+//! `GraphOpts.fade` colours every cell by how high it sits in the plot:
+//! dim at the baseline, the series colour through the body, bright at the
+//! peak. That is btop's gradient, and what makes a filled area read as
+//! depth rather than as a solid block. Under the `terminal` theme it is
+//! built from the RGB the terminal reports for its own palette (see
+//! [`crate::ui::term_palette`]), or steps between two palette tokens when
+//! the terminal doesn't say.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use std::sync::RwLock;
 
+use crate::ui::term_palette::{self, Palette};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphStyle {
-    /// Solid-colour stacked blocks — the look diskwatch shipped with.
+    /// Solid-colour stacked blocks, for terminals whose font has no
+    /// braille coverage.
     Bars,
-    /// btop-style braille area plot: 4× the vertical resolution of
-    /// `Bars` while keeping the filled-area look.
+    /// btop-style braille area plot: twice the samples and 4× the
+    /// vertical resolution of `Bars`. The default.
     Dots,
 }
 
 pub const GRAPH_STYLE_NAMES: &[&str] = &["bars", "dots"];
+
+/// The style and fade diskwatch uses when nothing says otherwise. `main.rs`
+/// and the `--write-config` file read these, and the globals below start
+/// at them, so the three can't drift.
+pub const DEFAULT_STYLE: GraphStyle = GraphStyle::Dots;
+pub const DEFAULT_FADE: bool = true;
 
 pub fn by_name(name: &str) -> GraphStyle {
     match name.to_lowercase().as_str() {
@@ -55,6 +68,14 @@ impl GraphStyle {
             GraphStyle::Dots => "dots",
         }
     }
+
+    /// Samples one cell column shows: braille packs two, blocks one.
+    pub fn samples_per_column(self) -> usize {
+        match self {
+            GraphStyle::Dots => 2,
+            GraphStyle::Bars => 1,
+        }
+    }
 }
 
 // ── Global setting ──────────────────────────────────────────────────────────
@@ -62,8 +83,8 @@ impl GraphStyle {
 /// Style and fade live in a global for the same reason the theme does:
 /// the palette accessors and every chart call site can read them without
 /// threading a reference through every render function.
-static ACTIVE: RwLock<GraphStyle> = RwLock::new(GraphStyle::Bars);
-static FADE: RwLock<bool> = RwLock::new(false);
+static ACTIVE: RwLock<GraphStyle> = RwLock::new(DEFAULT_STYLE);
+static FADE: RwLock<bool> = RwLock::new(DEFAULT_FADE);
 
 pub fn active() -> GraphStyle {
     *ACTIVE.read().expect("graph style lock poisoned")
@@ -75,6 +96,13 @@ pub fn set_by_name(name: &str) {
 
 pub fn name() -> &'static str {
     active().name()
+}
+
+/// Samples per cell column under the active style. A caller that trims a
+/// history to the chart's width needs this many per column, or a braille
+/// chart draws its data in the right half only.
+pub fn samples_per_column() -> usize {
+    active().samples_per_column()
 }
 
 /// Advance to the next style, wrapping. Returns the new name.
@@ -128,14 +156,16 @@ pub fn toggle_fade() -> bool {
 /// on the next frame with nothing to invalidate.
 #[derive(Debug, Clone, Copy)]
 pub struct GraphOpts {
-    /// Right-bright / left-dim gradient plus the dot grid.
+    /// Colour each cell by its height in the plot — dim at the baseline,
+    /// the series colour through the body, bright at the peak. Off draws
+    /// the series in one flat colour.
     pub fade: bool,
-    /// Theme background, the "fade-to" anchor when interpolating.
+    /// Theme background, the colour a fade's dim end leans toward.
     pub bg: Color,
-    /// True under the `terminal` theme, where every colour must resolve
-    /// through the user's own palette. Fade interpolates in RGB, so it
-    /// switches off rather than emitting the 24-bit values that theme
-    /// exists to avoid.
+    /// True under the `terminal` theme, where `bg` is `Reset` and the
+    /// series colours are palette slots with no RGB of their own. The fade
+    /// then comes from the terminal's reported palette, or from two palette
+    /// tokens — see [`terminal_gradient`].
     pub terminal_palette: bool,
     /// Draw `▁` (or the bottom braille row) across columns with no data,
     /// so a chart is grounded from frame zero instead of appearing as a
@@ -167,21 +197,12 @@ pub fn opts() -> GraphOpts {
     }
 }
 
-/// Lowest fraction of the base colour the leftmost (oldest) column gets
-/// when fade is on. 0.30 keeps the old data visible without letting it
-/// compete with the right edge.
-const MIN_FADE_ALPHA: f32 = 0.30;
-
-/// Smallest chart (in cells) where the grid overlay renders. Row
-/// sparklines are too narrow to benefit — the overlay is just noise.
-const GRID_MIN_W: u16 = 16;
-const GRID_MIN_H: u16 = 4;
-
 // ── Entry points ────────────────────────────────────────────────────────────
 
 /// Render `data` into `area`, auto-scaling the y-axis to the visible window.
 pub fn render(buf: &mut Buffer, area: Rect, data: &[f64], color: Color, opts: GraphOpts) {
-    let start = data.len().saturating_sub(area.width as usize);
+    let shown = area.width as usize * samples_per_column();
+    let start = data.len().saturating_sub(shown);
     let max = data[start..].iter().copied().fold(0.0_f64, f64::max);
     render_with_max(buf, area, data, max, color, opts);
 }
@@ -199,31 +220,26 @@ pub fn render_with_max(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    if opts.fade && area.width >= GRID_MIN_W && area.height >= GRID_MIN_H {
-        render_grid(buf, area, opts.bg, opts.terminal_palette);
-    }
     match active() {
         GraphStyle::Bars => render_bars(buf, area, data, max, color, opts),
         GraphStyle::Dots => render_dots(buf, area, data, max, color, opts),
     }
 }
 
-/// Colour for column `i` of `n`, honouring the fade setting.
-fn column_color(base: Color, i: usize, n: usize, opts: GraphOpts) -> Color {
-    if !opts.fade {
-        return base;
-    }
-    let denom = n.saturating_sub(1).max(1) as f32;
-    let alpha = MIN_FADE_ALPHA + (1.0 - MIN_FADE_ALPHA) * (i as f32 / denom);
-    fade_color(base, opts.bg, alpha, opts.terminal_palette)
+/// Take the rightmost `want` samples and report how many leading slots
+/// have no data behind them.
+fn window(data: &[f64], want: usize) -> (&[f64], usize) {
+    let start = data.len().saturating_sub(want);
+    let visible = &data[start..];
+    (visible, want.saturating_sub(visible.len()))
 }
 
-/// Take the rightmost `width` samples and report how many leading columns
-/// have no data behind them.
-fn window(data: &[f64], width: usize) -> (&[f64], usize) {
-    let start = data.len().saturating_sub(width);
-    let visible = &data[start..];
-    (visible, width.saturating_sub(visible.len()))
+/// Where the middle of cell row `cy` sits in a plot `h` rows tall, from 0.0
+/// at the baseline to 1.0 at the top. The midpoint, so a one-row sparkline
+/// samples the middle of the gradient — the series colour — rather than
+/// its dim end.
+fn cell_height(cy: usize, h: usize) -> f32 {
+    ((h - cy) as f32 - 0.5) / h as f32
 }
 
 // ── bars ────────────────────────────────────────────────────────────────────
@@ -240,6 +256,7 @@ fn render_bars(buf: &mut Buffer, area: Rect, data: &[f64], max: f64, base: Color
     // A flat-zero series still gets its baseline; without the guard the
     // division below would produce NaN.
     let max = if max > 0.0 { max } else { f64::INFINITY };
+    let gradient = gradient(base, opts);
 
     for x in 0..cell_w {
         let v = if x < leading {
@@ -247,7 +264,6 @@ fn render_bars(buf: &mut Buffer, area: Rect, data: &[f64], max: f64, base: Color
         } else {
             visible[x - leading]
         };
-        let color = column_color(base, x, cell_w, opts);
         let normalized = (v / max).clamp(0.0, 1.0);
         let total_eighths = (normalized * cell_h as f64 * 8.0).round() as usize;
 
@@ -263,6 +279,11 @@ fn render_bars(buf: &mut Buffer, area: Rect, data: &[f64], max: f64, base: Color
             } else {
                 continue;
             };
+            // Each cell takes its colour from where it sits in the plot,
+            // so a bar darkens toward its base and brightens at its tip.
+            let color = gradient
+                .as_ref()
+                .map_or(base, |g| g.at(cell_height(cy, cell_h)));
             if let Some(cell) = buf.cell_mut((area.x + x as u16, area.y + cy as u16)) {
                 cell.set_char(glyph).set_fg(color).set_bg(opts.bg);
             }
@@ -282,73 +303,262 @@ const BRAILLE_BIT: [[u8; 4]; 2] = [
 
 const BRAILLE_BASE: u32 = 0x2800;
 
-/// Mask lighting every dot in one sub-row, across both sub-columns.
-///
-/// Filling only `BRAILLE_BIT[0]` leaves every cell half-empty, which
-/// reads as a sparse dot matrix rather than the filled area this style is
-/// meant to produce — the bug netwatch shipped and fixed in v0.28.0.
-fn row_mask(row_in_cell: usize) -> u8 {
-    (1 << BRAILLE_BIT[0][row_in_cell]) | (1 << BRAILLE_BIT[1][row_in_cell])
-}
-
+/// Two samples per cell column, one per braille sub-column, each filled
+/// from the bottom to its height in braille pixels.
 fn render_dots(buf: &mut Buffer, area: Rect, data: &[f64], max: f64, base: Color, opts: GraphOpts) {
     let cell_w = area.width as usize;
     let cell_h = area.height as usize;
     let pix_h = cell_h * 4;
-    let (visible, leading) = window(data, cell_w);
+    let (visible, leading) = window(data, cell_w * 2);
     let max = if max > 0.0 { max } else { f64::INFINITY };
+    let gradient = gradient(base, opts);
 
-    let mut masks = vec![vec![0u8; cell_w]; cell_h];
-
-    for x in 0..cell_w {
-        let v = if x < leading {
+    // Pixel rows lit from the bottom, 0 for none. Zero lights the bottom
+    // row when there's a baseline, which grounds a quiet series the same
+    // way `bars` does with `▁`; the top of the axis lights all of them.
+    let lit = |i: usize| -> usize {
+        let v = if i < leading {
             0.0
         } else {
-            visible[x - leading]
+            visible[i - leading]
         };
-        let normalized = (v / max).clamp(0.0, 1.0);
-        // Height in braille pixels, counted from the bottom.
-        let top = (normalized * (pix_h - 1) as f64).round() as usize;
-
         if v <= 0.0 && !opts.baseline {
+            return 0;
+        }
+        let normalized = (v / max).clamp(0.0, 1.0);
+        (normalized * (pix_h - 1) as f64).round() as usize + 1
+    };
+
+    for cx in 0..cell_w {
+        let (left, right) = (lit(cx * 2), lit(cx * 2 + 1));
+        if left == 0 && right == 0 {
             continue;
         }
-        // `top == 0` still lights the bottom pixel row, which is what
-        // gives a zero-valued column the same grounded baseline `bars`
-        // draws with `▁`.
-        for fill in 0..=top {
-            let pix_y_from_top = (pix_h - 1) - fill;
-            masks[pix_y_from_top / 4][x] |= row_mask(pix_y_from_top % 4);
-        }
-    }
-
-    for (y, row) in masks.iter().enumerate() {
-        for (x, &mask) in row.iter().enumerate() {
-            if mask == 0 {
+        for cy in 0..cell_h {
+            let mut bits: u8 = 0;
+            for (s, (l_dot, r_dot)) in BRAILLE_BIT[0].iter().zip(BRAILLE_BIT[1]).enumerate() {
+                // This pixel row's height, counted from 1 at the bottom.
+                let depth = pix_h - (cy * 4 + s);
+                if left >= depth {
+                    bits |= 1 << l_dot;
+                }
+                if right >= depth {
+                    bits |= 1 << r_dot;
+                }
+            }
+            if bits == 0 {
                 continue;
             }
-            let ch = char::from_u32(BRAILLE_BASE | mask as u32).unwrap_or(' ');
-            let color = column_color(base, x, cell_w, opts);
-            if let Some(cell) = buf.cell_mut((area.x + x as u16, area.y + y as u16)) {
+            let ch = char::from_u32(BRAILLE_BASE | bits as u32).unwrap_or(' ');
+            let color = gradient
+                .as_ref()
+                .map_or(base, |g| g.at(cell_height(cy, cell_h)));
+            if let Some(cell) = buf.cell_mut((area.x + cx as u16, area.y + cy as u16)) {
                 cell.set_char(ch).set_fg(color).set_bg(opts.bg);
             }
         }
     }
 }
 
-// ── fade + grid ─────────────────────────────────────────────────────────────
+// ── gradient ────────────────────────────────────────────────────────────────
 
-/// Linear-interpolate from `bg` toward `base` at fraction `alpha`.
+/// Bottom of the gradient: the fraction of the series colour a cell on the
+/// baseline starts from, before the contrast floor lifts it. 0.30 keeps a
+/// quiet series visible without letting it compete with a busy one.
+const MIN_FADE_ALPHA: f32 = 0.30;
+
+/// The least a gradient's dimmest stop may contrast with the background.
+/// An area graph puts most of its ink near the baseline, so that end has to
+/// be readable, not only the peaks.
+const MIN_RAMP_CONTRAST: f64 = 4.0;
+
+/// The least the series colour may contrast with the background. It has to
+/// clear [`MIN_RAMP_CONTRAST`] by enough for the stops below it to climb.
+const MIN_SERIES_CONTRAST: f64 = 6.0;
+
+/// What a gradient is measured against when the background is the
+/// terminal's and the terminal didn't report it.
+const ASSUMED_DARK_BG: (u8, u8, u8) = (0x1a, 0x1b, 0x26);
+
+/// Colour stops, sampled 0.0..=1.0 from the baseline to the top of a plot.
 ///
-/// Only meaningful in RGB. Under the `terminal` theme the base passes
-/// through untouched: there is no 16-colour equivalent of a gradient, so
-/// fade degrades to off rather than to wrong — and `bg` is `Reset` there,
-/// so interpolating would fade toward an assumed black regardless of the
-/// terminal's real background.
-pub fn fade_color(base: Color, bg: Color, alpha: f32, defer_to_terminal: bool) -> Color {
-    if defer_to_terminal {
-        return base;
+/// A gradient of repeated palette tokens is the 16-colour step: [`lerp`] returns its lower input for
+/// anything that isn't RGB, so sampling lands on a token rather than
+/// inventing a colour between two.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    stops: Vec<Color>,
+}
+
+impl Gradient {
+    pub fn new(stops: Vec<Color>) -> Self {
+        Self { stops }
     }
+
+    /// Sample at `f`, clamped to 0.0..=1.0.
+    pub fn at(&self, f: f32) -> Color {
+        let f = if f.is_finite() {
+            f.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        match self.stops.len() {
+            0 => Color::Reset,
+            1 => self.stops[0],
+            n => {
+                let t = f * (n - 1) as f32;
+                let i = t.floor() as usize;
+                if i >= n - 1 {
+                    return self.stops[n - 1];
+                }
+                lerp(self.stops[i], self.stops[i + 1], t - i as f32)
+            }
+        }
+    }
+}
+
+/// The gradient a chart in `base` paints with, or `None` when fade is off.
+pub fn gradient(base: Color, opts: GraphOpts) -> Option<Gradient> {
+    if !opts.fade {
+        return None;
+    }
+    Some(if opts.terminal_palette {
+        terminal_gradient(base, term_palette::get())
+    } else {
+        magnitude(base, opts.bg)
+    })
+}
+
+/// The gradient under the `terminal` theme.
+///
+/// With the palette the terminal reported, it is the full blend, built from
+/// the terminal's own RGB for `base` and for its background. That keeps
+/// the theme's promise: the colours are still the ones the user chose, and
+/// diskwatch only adds the shades between them.
+///
+/// Without one, two palette tokens: the series colour along the body of the
+/// plot and its bright variant over the top quarter, which is what btop
+/// draws on a 16-colour terminal. A one-row sparkline samples the middle and
+/// stays the series colour.
+pub fn terminal_gradient(base: Color, palette: Option<&Palette>) -> Gradient {
+    let reported = palette.and_then(|p| Some((p.rgb(base)?, p.bg?)));
+    match reported {
+        Some(((r, g, b), (br, bgc, bb))) => magnitude(Color::Rgb(r, g, b), Color::Rgb(br, bgc, bb)),
+        None => {
+            let bright = bright_token(base);
+            Gradient::new(vec![base, base, base, bright, bright])
+        }
+    }
+}
+
+/// The palette's bright variant of a named or indexed colour.
+///
+/// Already-bright tokens and `Reset` come back unchanged: a series drawn
+/// in the terminal's foreground has no brighter self, and inventing one is
+/// what the palette-deferring theme promises not to do.
+pub fn bright_token(c: Color) -> Color {
+    match c {
+        Color::Black => Color::DarkGray,
+        Color::Red => Color::LightRed,
+        Color::Green => Color::LightGreen,
+        Color::Yellow => Color::LightYellow,
+        Color::Blue => Color::LightBlue,
+        Color::Magenta => Color::LightMagenta,
+        Color::Cyan => Color::LightCyan,
+        Color::Gray => Color::White,
+        Color::DarkGray => Color::Gray,
+        Color::Indexed(n) if n < 8 => Color::Indexed(n + 8),
+        other => other,
+    }
+}
+
+/// btop's gradient: dim at the baseline, the series colour in the middle,
+/// and at the peak moved further from the background — lighter on a dark
+/// one, darker on a light one.
+///
+/// A cell's colour comes from how high it sits, so the shape of the data is
+/// legible even where the fill is continuous. diskwatch used to fade along
+/// the time axis instead, old columns dim and new ones bright, which dims
+/// the history rather than describing it and leaves a steady series a flat
+/// wall.
+pub fn magnitude(base: Color, bg: Color) -> Gradient {
+    // Resolve the series colour to RGB first: a named colour would pass
+    // through `lerp` unchanged, and the top stops would all collapse to it.
+    let (r, g, b) = to_rgb_or_default(base, (255, 255, 255));
+    let behind = to_rgb_or_default(bg, ASSUMED_DARK_BG);
+    let base = with_contrast(Color::Rgb(r, g, b), behind, MIN_SERIES_CONTRAST);
+    // The floor moves up the fade rather than toward white, so it keeps the hue.
+    let floor = (0..=70)
+        .map(|step| MIN_FADE_ALPHA + step as f32 / 100.0)
+        .find(|&alpha| contrast(fade_color(base, bg, alpha), behind) >= MIN_RAMP_CONTRAST)
+        .unwrap_or(1.0);
+    // The peak moves away from the background as the floor moves toward it.
+    // On a light background it darkens, and less far, so it keeps the hue
+    // rather than going to black.
+    let (away, near, far) = if luminance(behind) < 0.18 {
+        (Color::Rgb(255, 255, 255), 0.42, 0.76)
+    } else {
+        (Color::Rgb(0, 0, 0), 0.25, 0.5)
+    };
+    Gradient::new(vec![
+        fade_color(base, bg, floor),
+        fade_color(base, bg, floor + (1.0 - floor) * 0.46),
+        base,
+        lerp(base, away, near),
+        lerp(base, away, far),
+    ])
+}
+
+/// `c`, moved away from the background only as far as `min` needs.
+fn with_contrast(c: Color, behind: (u8, u8, u8), min: f64) -> Color {
+    let away = if luminance(behind) < 0.18 {
+        Color::Rgb(255, 255, 255)
+    } else {
+        Color::Rgb(0, 0, 0)
+    };
+    (0..=100)
+        .map(|step| lerp(c, away, step as f32 / 100.0))
+        .find(|&moved| contrast(moved, behind) >= min)
+        .unwrap_or(away)
+}
+
+/// WCAG contrast ratio.
+fn contrast(c: Color, behind: (u8, u8, u8)) -> f64 {
+    let a = luminance(to_rgb_or_default(c, behind));
+    let b = luminance(behind);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// WCAG relative luminance.
+fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    let linear = |v: u8| {
+        let v = v as f64 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// Linear blend, RGB only. Anything else returns `a` unchanged rather than
+/// guessing at what a palette slot looks like, which is what makes a
+/// gradient of palette tokens step instead of blend.
+pub fn lerp(a: Color, b: Color, f: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let f = f.clamp(0.0, 1.0);
+            Color::Rgb(lerp_u8(ar, br, f), lerp_u8(ag, bg, f), lerp_u8(ab, bb, f))
+        }
+        _ => a,
+    }
+}
+
+/// Linear-interpolate from `bg` toward `base` at fraction `alpha`, in RGB.
+/// Named colours resolve through the standard palette first, and a `Reset`
+/// background counts as black.
+pub fn fade_color(base: Color, bg: Color, alpha: f32) -> Color {
     let alpha = alpha.clamp(0.0, 1.0);
     let (br, bgn, bb) = to_rgb_or_default(base, (255, 255, 255));
     let (gr, gg, gb) = to_rgb_or_default(bg, (0, 0, 0));
@@ -359,10 +569,9 @@ pub fn fade_color(base: Color, bg: Color, alpha: f32, defer_to_terminal: bool) -
     )
 }
 
-/// Standard xterm palette mapping. Necessary because several themes use
-/// ANSI named colours; without it every faded chart would collapse to the
-/// same grey gradient regardless of its series colour, which looks
-/// identical to "fade off" at a glance.
+/// Standard VGA palette mapping. Several themes use ANSI named colours;
+/// without it every faded chart would collapse to the same grey gradient
+/// regardless of its series colour.
 fn to_rgb_or_default(c: Color, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
     match c {
         Color::Rgb(r, g, b) => (r, g, b),
@@ -391,45 +600,6 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t)
         .round()
         .clamp(0.0, 255.0) as u8
-}
-
-/// Faint dot grid behind the chart. Drawn before the data so any data
-/// cell overwrites it, leaving the grid visible only through the empty
-/// regions.
-fn render_grid(buf: &mut Buffer, area: Rect, bg: Color, defer_to_terminal: bool) {
-    // The grid's base is a fixed grey, so under the terminal theme it
-    // would survive as raw RGB. DarkGray is that palette's own answer to
-    // "faint chrome" and tracks whatever the user's terminal defines.
-    let grid_color = if defer_to_terminal {
-        Color::DarkGray
-    } else {
-        fade_color(Color::Rgb(150, 150, 150), bg, 0.20, false)
-    };
-    let cell_w = area.width as usize;
-    let cell_h = area.height as usize;
-    if cell_w < GRID_MIN_W as usize || cell_h < GRID_MIN_H as usize {
-        return;
-    }
-    let v_step = (cell_w / 4).max(2);
-    let h_step = (cell_h / 4).max(1);
-
-    for x in (v_step..cell_w).step_by(v_step) {
-        for cy in 0..cell_h {
-            if let Some(cell) = buf.cell_mut((area.x + x as u16, area.y + cy as u16)) {
-                cell.set_char('·').set_fg(grid_color).set_bg(bg);
-            }
-        }
-    }
-    for y in (h_step..cell_h).step_by(h_step) {
-        for cx in 0..cell_w {
-            if let Some(cell) = buf.cell_mut((area.x + cx as u16, area.y + y as u16)) {
-                // Leave intersections alone so they stay visually balanced.
-                if cell.symbol() != "·" {
-                    cell.set_char('·').set_fg(grid_color).set_bg(bg);
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -466,14 +636,51 @@ mod tests {
         buf.cell((x, y)).unwrap().symbol().to_string()
     }
 
+    fn fg(buf: &Buffer, x: u16, y: u16) -> Color {
+        buf.cell((x, y)).unwrap().fg
+    }
+
+    fn rgb(c: Color) -> (u8, u8, u8) {
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("expected Rgb, got {other:?}"),
+        }
+    }
+
+    const DARK: Color = Color::Rgb(0x0c, 0x14, 0x18);
+
+    fn faded(bg: Color) -> GraphOpts {
+        GraphOpts {
+            fade: true,
+            bg,
+            ..GraphOpts::default()
+        }
+    }
+
     #[test]
     fn dots_fill_both_braille_sub_columns() {
         // Filling only BRAILLE_BIT[0] yields `⡇` and the chart reads as a
         // sparse dot matrix instead of a filled area — the bug netwatch
         // shipped in its first dots release.
         let area = Rect::new(0, 0, 1, 1);
-        let buf = draw(GraphStyle::Dots, area, &[10.0], GraphOpts::default());
+        let buf = draw(GraphStyle::Dots, area, &[10.0, 10.0], GraphOpts::default());
         assert_eq!(symbol(&buf, 0, 0), "⣿");
+    }
+
+    #[test]
+    fn dots_draw_two_samples_per_cell() {
+        // The left sub-column is the older sample. A quiet one beside a
+        // full one is a half-lit cell, not an average of the two.
+        let area = Rect::new(0, 0, 1, 1);
+        let buf = draw_scaled(
+            GraphStyle::Dots,
+            area,
+            &[0.0, 10.0],
+            10.0,
+            GraphOpts::default(),
+        );
+        // Dot 7 (the left baseline) plus dots 4, 5, 6 and 8.
+        assert_eq!(symbol(&buf, 0, 0), "⣸");
     }
 
     #[test]
@@ -481,7 +688,13 @@ mod tests {
         // A low sample lights the bottom sub-row across *both* sub-columns
         // — dots 7 and 8 → 0x28C0 → `⣀` — not just the left one.
         let area = Rect::new(0, 0, 1, 1);
-        let buf = draw_scaled(GraphStyle::Dots, area, &[1.0], 10.0, GraphOpts::default());
+        let buf = draw_scaled(
+            GraphStyle::Dots,
+            area,
+            &[1.0, 1.0],
+            10.0,
+            GraphOpts::default(),
+        );
         assert_eq!(symbol(&buf, 0, 0), "⣀");
     }
 
@@ -490,7 +703,7 @@ mod tests {
         // diskwatch's charts have always shown a floor rather than a
         // void; switching styles must not change that.
         let area = Rect::new(0, 0, 4, 2);
-        let zeros = [0.0; 4];
+        let zeros = [0.0; 8];
 
         let bars = draw(GraphStyle::Bars, area, &zeros, GraphOpts::default());
         assert_eq!(symbol(&bars, 0, 1), "▁", "bars lost its baseline");
@@ -515,100 +728,171 @@ mod tests {
     }
 
     #[test]
+    fn dots_show_twice_the_history_of_bars() {
+        // Eight samples across four columns: bars keeps the last four, and
+        // dots all eight. The spike in sample 1 is only on screen under dots.
+        let area = Rect::new(0, 0, 4, 1);
+        let data = [0.0, 9.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let dots = draw_scaled(GraphStyle::Dots, area, &data, 9.0, GraphOpts::default());
+        assert_eq!(symbol(&dots, 0, 0), "⣸", "dots dropped the oldest samples");
+        let bars = draw_scaled(GraphStyle::Bars, area, &data, 9.0, GraphOpts::default());
+        assert!(
+            (0..4).all(|x| symbol(&bars, x, 0) != "█"),
+            "bars drew a sample it has no column for"
+        );
+    }
+
+    #[test]
     fn dots_resolve_four_levels_where_bars_resolve_one() {
         // The whole reason to offer dots: one cell high, a single row
         // resolves four braille pixel rows. Values on the quarter points
-        // of the axis must therefore give four distinct glyphs — the same
-        // series under `bars` collapses to far fewer legible steps.
+        // of the axis must therefore give four distinct glyphs.
         let area = Rect::new(0, 0, 4, 1);
         let buf = draw_scaled(
             GraphStyle::Dots,
             area,
-            &[0.0, 1.0, 2.0, 3.0],
+            &[0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
             3.0,
             GraphOpts::default(),
         );
         let glyphs: Vec<String> = (0..4).map(|x| symbol(&buf, x, 0)).collect();
-        let unique: std::collections::HashSet<&String> = glyphs.iter().collect();
-        assert_eq!(
-            unique.len(),
-            4,
-            "expected 4 distinct levels, got {glyphs:?}"
-        );
         assert_eq!(glyphs, vec!["⣀", "⣤", "⣶", "⣿"], "levels out of order");
     }
 
     #[test]
-    fn fade_off_paints_every_column_the_same_colour() {
-        let area = Rect::new(0, 0, 8, 2);
-        let data: Vec<f64> = (1..=8).map(|v| v as f64).collect();
+    fn fade_off_paints_every_cell_the_same_colour() {
+        let area = Rect::new(0, 0, 8, 4);
+        let data = [10.0; 16];
         for style in [GraphStyle::Bars, GraphStyle::Dots] {
             let buf = draw(style, area, &data, GraphOpts::default());
-            let left = buf.cell((0, 1)).unwrap().fg;
-            let right = buf.cell((7, 1)).unwrap().fg;
-            assert_eq!(left, right, "{style:?} faded with fade off");
-        }
-    }
-
-    #[test]
-    fn fade_on_dims_the_oldest_column() {
-        let area = Rect::new(0, 0, 8, 2);
-        let data = [5.0; 8];
-        let opts = GraphOpts {
-            fade: true,
-            bg: Color::Rgb(0, 0, 0),
-            ..GraphOpts::default()
-        };
-        for style in [GraphStyle::Bars, GraphStyle::Dots] {
-            let buf = draw(style, area, &data, opts);
-            let left = buf.cell((0, 1)).unwrap().fg;
-            let right = buf.cell((7, 1)).unwrap().fg;
-            assert_ne!(left, right, "{style:?} ignored fade");
-            match (left, right) {
-                (Color::Rgb(_, lg, _), Color::Rgb(_, rg, _)) => {
-                    assert!(lg < rg, "{style:?} faded the wrong direction");
-                }
-                other => panic!("expected Rgb pair, got {other:?}"),
+            for (x, y) in [(0, 0), (0, 3), (7, 0), (7, 3)] {
+                assert_eq!(
+                    fg(&buf, x, y),
+                    Color::Green,
+                    "{style:?} faded with fade off"
+                );
             }
         }
     }
 
     #[test]
-    fn fade_passes_base_through_untouched_under_the_terminal_theme() {
-        // Fade interpolates in RGB. Under `terminal` that would emit
-        // 24-bit colour for every faded cell and silently undo the one
-        // guarantee that theme makes.
-        let base = Color::Cyan;
-        for alpha in [0.0, 0.3, 0.55, 1.0] {
-            assert_eq!(fade_color(base, Color::Reset, alpha, true), base);
+    fn fade_brightens_with_height_not_with_time() {
+        // btop's gradient runs up the plot. The old fade ran along it,
+        // dimming the history; a steady series is now the same colour from
+        // one end of the window to the other.
+        let area = Rect::new(0, 0, 8, 4);
+        let data = [10.0; 16];
+        for style in [GraphStyle::Bars, GraphStyle::Dots] {
+            let buf = draw(style, area, &data, faded(DARK));
+            for y in 0..4 {
+                assert_eq!(fg(&buf, 0, y), fg(&buf, 7, y), "{style:?} faded along time");
+            }
+            let lum = |y| luminance(rgb(fg(&buf, 3, y)));
+            assert!(
+                lum(3) < lum(2) && lum(2) < lum(1) && lum(1) < lum(0),
+                "{style:?} doesn't brighten toward the top"
+            );
         }
+    }
+
+    #[test]
+    fn a_one_row_sparkline_is_the_series_colour() {
+        // One row sits at the middle of the gradient, which is the series
+        // colour, not the dim end.
+        let area = Rect::new(0, 0, 4, 1);
+        let buf = draw(GraphStyle::Dots, area, &[5.0; 8], faded(DARK));
+        let g = magnitude(Color::Green, DARK);
+        assert_eq!(fg(&buf, 0, 0), g.at(0.5));
+        assert_eq!(g.at(0.5), g.stops[2]);
+    }
+
+    #[test]
+    fn the_dim_end_stays_legible() {
+        // Most of an area graph's ink is near the baseline, so the bottom
+        // stop has to clear the floor on every theme's background.
+        for theme in crate::ui::theme::THEME_NAMES {
+            let t = crate::ui::theme::by_name(theme);
+            if t.name == "terminal" {
+                continue;
+            }
+            for base in [t.green, t.cyan] {
+                let g = magnitude(base, t.bg);
+                let behind = to_rgb_or_default(t.bg, ASSUMED_DARK_BG);
+                let c = contrast(g.at(0.0), behind);
+                assert!(c >= MIN_RAMP_CONTRAST - 0.05, "{theme}: floor is {c:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn the_peak_moves_away_from_a_light_background() {
+        // Lightening toward white on a pale background fades the peak into
+        // it. There, the peak darkens instead.
+        let paper = Color::Rgb(0xf5, 0xf5, 0xf2);
+        let g = magnitude(Color::Rgb(0x1f, 0x88, 0x3d), paper);
+        assert!(luminance(rgb(g.at(1.0))) < luminance(rgb(g.at(0.5))));
+        let g = magnitude(Color::Rgb(0x1f, 0x88, 0x3d), DARK);
+        assert!(luminance(rgb(g.at(1.0))) > luminance(rgb(g.at(0.5))));
+    }
+
+    #[test]
+    fn terminal_fade_without_a_palette_steps_between_two_tokens() {
+        // Nothing reported, so nothing to blend: the series colour, then
+        // its bright variant over the top quarter. No RGB.
+        let g = terminal_gradient(Color::Green, None);
+        for i in 0..=20 {
+            let c = g.at(i as f32 / 20.0);
+            assert!(
+                c == Color::Green || c == Color::LightGreen,
+                "invented {c:?}"
+            );
+        }
+        assert_eq!(g.at(0.5), Color::Green);
+        assert_eq!(g.at(1.0), Color::LightGreen);
+    }
+
+    #[test]
+    fn terminal_fade_blends_the_colours_the_terminal_reported() {
+        // The terminal says its green is #5cd989 on #0c1418. The gradient
+        // is built from those, not from a standard palette's green.
+        let mut p = Palette::default();
+        p.slots[2] = Some((0x5c, 0xd9, 0x89));
+        p.bg = Some((0x0c, 0x14, 0x18));
+        let g = terminal_gradient(Color::Green, Some(&p));
+        assert_eq!(g, magnitude(Color::Rgb(0x5c, 0xd9, 0x89), DARK));
+        let (r, gr, b) = rgb(g.at(0.0));
+        assert!(gr > r && gr > b, "lost the reported hue: {:?}", (r, gr, b));
+
+        // A slot the terminal didn't report falls back to tokens.
+        let g = terminal_gradient(Color::Cyan, Some(&p));
+        assert_eq!(g.at(1.0), Color::LightCyan);
+    }
+
+    #[test]
+    fn named_colours_get_a_real_gradient() {
+        // `lerp` passes named colours through, so without resolving the
+        // series colour to RGB first the top three stops were one token.
+        let g = magnitude(Color::Green, Color::Reset);
+        assert_ne!(g.at(0.5), g.at(0.75));
+        assert_ne!(g.at(0.75), g.at(1.0));
     }
 
     #[test]
     fn fade_color_endpoints_and_midpoint() {
         let base = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(0, 0, 0);
-        assert_eq!(fade_color(base, bg, 1.0, false), base);
-        assert_eq!(fade_color(base, bg, 0.0, false), bg);
-        assert_eq!(fade_color(base, bg, 0.5, false), Color::Rgb(100, 50, 25));
+        assert_eq!(fade_color(base, bg, 1.0), base);
+        assert_eq!(fade_color(base, bg, 0.0), bg);
+        assert_eq!(fade_color(base, bg, 0.5), Color::Rgb(100, 50, 25));
         // Out-of-range alpha clamps rather than wrapping.
-        assert_eq!(fade_color(base, bg, 2.0, false), base);
-        assert_eq!(fade_color(base, bg, -1.0, false), bg);
+        assert_eq!(fade_color(base, bg, 2.0), base);
+        assert_eq!(fade_color(base, bg, -1.0), bg);
     }
 
     #[test]
-    fn named_colours_keep_their_hue_when_faded() {
-        // Regression: without the palette mapping, Color::Green against a
-        // Reset bg faded through greyscale — indistinguishable from fade
-        // being off.
-        let dim = fade_color(Color::Green, Color::Reset, 0.3, false);
-        match dim {
-            Color::Rgb(r, g, b) => {
-                assert_eq!((r, b), (0, 0), "hue drifted off green");
-                assert!(g > 0 && g < 170, "green should dim, not vanish");
-            }
-            other => panic!("expected Rgb, got {other:?}"),
-        }
+    fn gradient_survives_nan() {
+        let g = magnitude(Color::Green, DARK);
+        assert_eq!(g.at(f32::NAN), g.at(0.0));
     }
 
     #[test]

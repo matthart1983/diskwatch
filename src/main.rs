@@ -56,25 +56,23 @@ struct Cli {
     #[arg(long, value_parser = config::validate_theme)]
     theme: Option<String>,
 
-    /// Chart style: "bars" (default) or "dots" for btop-style braille,
-    /// which resolves four levels per row instead of one. Also accepts
-    /// "braille" and "btop".
+    /// Chart style: "dots" (default) for btop-style braille, which shows
+    /// twice the history and four levels per row, or "bars" for fonts
+    /// without braille. Also accepts "braille" and "btop".
     #[arg(long, value_parser = config::validate_graph)]
     graph: Option<String>,
 
-    /// btop's gradient: charts fade from bright at `now` to dim at the
-    /// left edge, over a faint dot grid. Off by default.
+    /// btop's gradient: each part of a chart is coloured by its height,
+    /// dim at the baseline and bright at the peak. On by default.
     ///
-    /// Needs a theme with real RGB to fade through, so it does nothing
-    /// under the default `--theme terminal` — a 16-color palette has no
-    /// intermediate shades. Pair it with `--theme dark` (or any other
-    /// built-in) to see it.
+    /// Under `--theme terminal` the gradient is built from the colours
+    /// your terminal reports for its own palette. A terminal that doesn't
+    /// report them gets a two-step fade, from each colour to its bright
+    /// variant.
     #[arg(long)]
     graph_fade: bool,
 
-    /// Turn the gradient off. Only useful against a config file that turns
-    /// it on: a bare flag can't express "no", so without this there would
-    /// be a setting the file could set and the CLI could not unset.
+    /// Turn the gradient off, for one flat colour per chart.
     #[arg(long, conflicts_with = "graph_fade")]
     no_graph_fade: bool,
 
@@ -210,13 +208,13 @@ fn resolve(cli: &Cli, cfg: &Config, env_watch: Option<Vec<PathBuf>>) -> Resolved
             .graph
             .clone()
             .or_else(|| cfg.graph.clone())
-            .unwrap_or_else(|| "bars".to_string()),
+            .unwrap_or_else(|| ui::graph::DEFAULT_STYLE.name().to_string()),
         graph_fade: if cli.graph_fade {
             true
         } else if cli.no_graph_fade {
             false
         } else {
-            cfg.graph_fade.unwrap_or(false)
+            cfg.graph_fade.unwrap_or(ui::graph::DEFAULT_FADE)
         },
         view,
         tab: cli

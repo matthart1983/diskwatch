@@ -3,6 +3,34 @@
 Changes from 0.7.1 on. Earlier releases are on the
 [releases page](https://github.com/matthart1983/diskwatch/releases).
 
+## [Unreleased]
+
+### Graphs
+
+- Graphs fade the way btop's do, and netwatch's: each part of a chart is
+  coloured by its height, dim at the baseline, the series colour through
+  the body and bright at the peak. The old fade dimmed older columns
+  instead, which faded the history rather than describing it. The dot grid
+  behind it is gone too.
+- The fade works under the default `terminal` theme. diskwatch asks the
+  terminal for the RGB of its own palette and background (OSC 4 and
+  OSC 11) and builds the gradient from those, so the colours are still
+  your terminal theme's. A terminal that doesn't answer gets a two-step
+  fade, from each colour to its bright variant. Before, the fade did
+  nothing under `terminal`, and the dense view's graphs were one flat
+  colour.
+- Braille (`dots`) and the fade are now the defaults. `--graph bars` and
+  `--no-graph-fade` bring back the old look, and a config file that sets
+  either keeps it.
+- Braille charts in the full and Lite views show two samples per column,
+  as the dense view's always have, so they hold twice the history. Lite's
+  axis label says how far back that is.
+
+### Dense
+
+- While you type a filter, the file list narrows under the prompt. It used
+  to go blank until Enter, while the border still counted the matches.
+
 ## [0.7.2] - 2026-11-14
 
 ### Hot Files

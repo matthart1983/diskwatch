@@ -103,10 +103,10 @@ pub const DETAIL_ROWS: u16 = 3;
 /// every spike, which for a write-runaway detector defeats the feature.
 pub const SPARK_W: u16 = 9;
 
-/// Samples covered by sparkline column `i`, as a half-open range.
-pub fn spark_bucket(i: u16, samples: usize) -> std::ops::Range<usize> {
-    let lo = (i as usize * samples) / SPARK_W as usize;
-    let hi = ((i as usize + 1) * samples) / SPARK_W as usize;
+/// Samples covered by bucket `i` of `buckets`, as a half-open range.
+pub fn spark_bucket(i: usize, samples: usize, buckets: usize) -> std::ops::Range<usize> {
+    let lo = (i * samples) / buckets;
+    let hi = ((i + 1) * samples) / buckets;
     lo..hi.max(lo + 1)
 }
 
@@ -351,12 +351,13 @@ impl Layout {
         }
     }
 
-    /// History depth the charts want: one sample per column, so the axis
-    /// label is honest at any width. The handoff labelled the axis
+    /// History depth the charts want: as many samples as the chart has
+    /// slots for — one per column under `bars`, two under `dots` — so the
+    /// axis label is honest at any width. The handoff labelled the axis
     /// "60s ago" while drawing 78 columns, which duplicated ~30% of the
     /// samples.
     pub fn history_samples(&self) -> usize {
-        self.content_w as usize
+        self.content_w as usize * graph::samples_per_column()
     }
 }
 
@@ -714,15 +715,16 @@ fn tail_padded(data: &[f64], width: usize) -> Vec<f64> {
     out
 }
 
-/// Collapse a history of any length to exactly [`SPARK_W`] values, taking
+/// Collapse a history of any length to exactly `buckets` values, taking
 /// the **max** of each bucket so a spike anywhere inside it survives.
-fn bucket_history(data: &[f64]) -> Vec<f64> {
-    if data.is_empty() {
+/// The sparkline wants [`SPARK_W`] times the samples one column shows.
+fn bucket_history(data: &[f64], buckets: usize) -> Vec<f64> {
+    if data.is_empty() || buckets == 0 {
         return Vec::new();
     }
-    (0..SPARK_W)
+    (0..buckets)
         .map(|i| {
-            let b = spark_bucket(i, data.len());
+            let b = spark_bucket(i, data.len(), buckets);
             data[b.start..b.end.min(data.len())]
                 .iter()
                 .copied()
@@ -737,7 +739,7 @@ fn chart(f: &mut Frame, area: Rect, samples: &[f64], color: Color) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let data = tail_padded(samples, area.width as usize);
+    let data = tail_padded(samples, area.width as usize * graph::samples_per_column());
     graph::render(f.buffer_mut(), area, &data, color, graph::opts());
 }
 
@@ -958,8 +960,8 @@ fn render_axis(f: &mut Frame, l: &Layout) {
         Style::default().fg(p::faint()),
         l.content_x_end(),
     );
-    // One sample per column, so the window is exactly as wide as the
-    // chart — the label is derived, never a hardcoded "60s".
+    // The window is exactly as wide as the chart's sample slots — the
+    // label is derived, never a hardcoded "60s".
     let left = format!(" {}s ago ", l.history_samples());
     put(
         f,
@@ -1077,7 +1079,7 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
         f,
         l.x_spark,
         ROW_TABLE_HEAD,
-        &format!("{}s", l.history_samples()),
+        &format!("{}s", l.content_w),
         head,
         end,
     );
@@ -1195,7 +1197,7 @@ fn render_table(f: &mut Frame, app: &App, l: &Layout, paused: bool) {
         );
         put_right(f, l.x_kind + W_KIND - 1, y, row.kind, secondary);
 
-        let bucketed = bucket_history(&row.history);
+        let bucketed = bucket_history(&row.history, SPARK_W as usize * graph::samples_per_column());
         if !bucketed.is_empty() {
             // The row's own background has to carry through, or the
             // selected row's tint gets punched out by the sparkline.
@@ -1490,9 +1492,16 @@ mod tests {
         // The handoff labelled the axis "60s ago" while drawing 78
         // columns, which duplicated ~30% of the samples. The window is
         // derived from the width at every size, so it cannot drift.
-        for w in [GRID_W, 100, 160, 240] {
-            let l = Layout::new(Rect::new(0, 0, w, GRID_H));
-            assert_eq!(l.history_samples(), l.content_w as usize);
+        for style in [graph::GraphStyle::Bars, graph::GraphStyle::Dots] {
+            graph::with_style(style, || {
+                for w in [GRID_W, 100, 160, 240] {
+                    let l = Layout::new(Rect::new(0, 0, w, GRID_H));
+                    assert_eq!(
+                        l.history_samples(),
+                        l.content_w as usize * style.samples_per_column()
+                    );
+                }
+            });
         }
     }
 
@@ -1517,10 +1526,13 @@ mod tests {
 
     #[test]
     fn spark_buckets_tile_the_history() {
-        for samples in [1usize, 8, 9, 10, 60, 78, 300] {
+        for (samples, buckets) in [1usize, 8, 9, 10, 60, 78, 300]
+            .into_iter()
+            .flat_map(|n| [(n, SPARK_W as usize), (n, SPARK_W as usize * 2)])
+        {
             let mut prev_end = 0;
-            for i in 0..SPARK_W {
-                let b = spark_bucket(i, samples);
+            for i in 0..buckets {
+                let b = spark_bucket(i, samples, buckets);
                 assert!(b.start <= b.end, "bucket {i} inverted for {samples}");
                 if i > 0 {
                     assert!(
@@ -1539,7 +1551,7 @@ mod tests {
         // survive into the sparkline. Sampling would drop it.
         let mut data = vec![0.0; 78];
         data[40] = 99.0;
-        let bucketed = bucket_history(&data);
+        let bucketed = bucket_history(&data, SPARK_W as usize);
         assert_eq!(bucketed.len() as u16, SPARK_W);
         assert!(bucketed.contains(&99.0), "the spike was lost: {bucketed:?}");
     }

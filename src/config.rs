@@ -331,9 +331,9 @@ pub fn default_file_contents() -> String {
          # Chart style: {}.\n\
          graph = \"{}\"\n\
          \n\
-         # btop's gradient. Needs a theme with real RGB to fade through, so it\n\
-         # does nothing under theme = \"terminal\".\n\
-         graph_fade = false\n\
+         # btop's gradient: charts dim at the baseline, bright at the peak.\n\
+         # Under theme = \"terminal\" it uses the colours your terminal reports.\n\
+         graph_fade = true\n\
          \n\
          # View to open in: {}.\n\
          view = \"full\"\n\
@@ -378,7 +378,7 @@ pub fn default_file_contents() -> String {
         ui::theme::THEME_NAMES.join(", "),
         ui::theme::DEFAULT_THEME,
         ui::graph::GRAPH_STYLE_NAMES.join(", "),
-        "bars",
+        ui::graph::DEFAULT_STYLE.name(),
         VIEW_MODE_NAMES.join(", "),
         TAB_NAMES.join(", "),
         crate::app::MIN_SMART_INTERVAL_SECS,

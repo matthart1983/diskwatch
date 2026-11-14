@@ -157,9 +157,9 @@ The full view needs a terminal of at least 40×12 and says so below that. Lite a
 | `--view` | `full`, `lite`, `dense` |
 | `--tab` | Start on a named tab |
 | `--theme` | `terminal` (default), `dark`, `light`, `ocean`, `solarized`, `dracula`, `nord` |
-| `--graph` | `bars` (default) or `dots` for btop-style braille |
-| `--graph-fade` | btop's brightness gradient and dot grid — needs an RGB theme, so pair with `--theme dark` |
-| `--no-graph-fade` | Turn the gradient off, against a config file that turns it on |
+| `--graph` | `dots` (default) for btop-style braille, or `bars` for fonts without braille |
+| `--graph-fade` | btop's gradient: each part of a chart coloured by its height. On by default |
+| `--no-graph-fade` | Turn the gradient off, for one flat colour per chart |
 | `--watch PATH` | Watch this path in Hot Files **instead of** the defaults. Repeatable |
 | `--watch-add PATH` | Watch this path **in addition to** the defaults. Repeatable |
 | `--config PATH` | Read this config file instead of the default location |
@@ -173,8 +173,13 @@ terminal profile, pywal, matugen or a system-wide rice carries straight through 
 diskwatch sits beside your other tools instead of fighting them.
 
 Pass `--theme dark` for diskwatch's own designed palette, or any of the other built-ins.
-Those pin real RGB, which is what `--graph-fade` needs to fade through — a 16-colour
-palette has no intermediate shades, so the gradient does nothing under the default.
+
+Graphs fade the way btop's do: dim at the baseline, the series colour through the body,
+bright at the peak. A 16-colour palette has no shades in between, so under the default
+theme diskwatch asks the terminal what RGB its own green, cyan and background are (OSC 4
+and OSC 11) and builds the gradient from those. Your terminal theme still decides the
+colours. A terminal that doesn't answer gets a two-step fade, from each colour to its
+bright variant. `--no-graph-fade` turns it off.
 
 Theme and graph style are also live in the settings overlay. Changes there last for the
 session unless you press `S`, which saves them to the config file below.
