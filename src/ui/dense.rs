@@ -1980,6 +1980,9 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
         },
     );
 
+    // The prompt takes the column-header row, and the matches stay listed
+    // under it, so each keystroke shows what it kept. Returning here after
+    // the prompt left the box empty while it said "1-11 of 138".
     if st.filter_input {
         br::text(
             buf,
@@ -1989,7 +1992,6 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
             p::cyan(),
             true,
         );
-        return;
     }
     if total == 0 {
         let (_, roots, err) = app.hot_files.snapshot_meta();
@@ -2110,7 +2112,9 @@ fn files_box(buf: &mut Buffer, area: Rect, app: &App, wide: bool) {
     // Look-ups by label, so a dropped column is simply absent rather than
     // shifting every index after it.
     let col = |lab: &str| cols.iter().find(|c| c.lab == lab).map(|c| (c.x, c.w));
-    header(buf, inner.x, inner.y, &cols, st.sort.column());
+    if !st.filter_input {
+        header(buf, inner.x, inner.y, &cols, st.sort.column());
+    }
 
     for (i, r) in rows[first..last].iter().enumerate() {
         let y = inner.y + 1 + i as u16;

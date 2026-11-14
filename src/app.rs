@@ -2438,6 +2438,50 @@ mod tests {
         }
     }
 
+    /// Typing a filter in Dense keeps the matches listed under the prompt.
+    /// It used to draw the prompt and stop, so the box said "1-2 of 2" over
+    /// nothing until Enter.
+    #[test]
+    fn dense_filter_lists_matches_while_typing() {
+        let mut app = App::new(TabId::Hot, ViewMode::Dense);
+        {
+            let mut state = app.hot_files.state.lock().unwrap();
+            for name in ["atlas-access.log", "atlas-error.log", "other.db"] {
+                let path = PathBuf::from(format!("/srv/{name}"));
+                state.activity.insert(
+                    path.clone(),
+                    collect::hot_files::FileActivity {
+                        path,
+                        events_per_sec: 3.0,
+                        total_events: 3,
+                        last_kind: collect::hot_files::ActivityKind::Modified,
+                        last_seen: Instant::now(),
+                        history: Default::default(),
+                        pushed: 0,
+                    },
+                );
+            }
+        }
+        handle_key(&mut app, KeyCode::Char('/'));
+        for c in "atlas".chars() {
+            handle_key(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.dense.filter_input, "still typing");
+        let mut term = Terminal::new(TestBackend::new(140, 46)).expect("terminal");
+        let frame = term.draw(|f| super::draw(f, &mut app)).expect("draw");
+        let text: String = frame.buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("/atlas_"), "the prompt is gone");
+        assert!(
+            text.contains("atlas-access.log"),
+            "matches hidden while typing"
+        );
+        assert!(
+            text.contains("atlas-error.log"),
+            "matches hidden while typing"
+        );
+        assert!(!text.contains("other.db"), "a non-match is listed");
+    }
+
     #[test]
     fn s_under_no_config_writes_nothing() {
         let dir = std::env::temp_dir().join(format!("diskwatch-nc-{}", std::process::id()));
