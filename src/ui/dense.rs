@@ -1397,12 +1397,11 @@ fn latency_box(buf: &mut Buffer, area: Rect, s: &Sys) {
 
     let total: u64 = s.hist.iter().sum();
     let max = s.hist.iter().copied().max().unwrap_or(1).max(1);
-    for i in 0..LAT_BUCKETS {
+    for (i, &n) in s.hist.iter().enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height - 2 {
             break;
         }
-        let n = s.hist[i];
         // Colour comes from the bucket's POSITION, not its count: the
         // right-hand buckets are red even when nearly empty, so you can see
         // where the tail would appear before it does.
