@@ -42,6 +42,11 @@ Changes from 0.7.1 on. Earlier releases are on the
   tile reading "unknown". It now says no problems were found but SMART
   wasn't read, and why. Lite's capacity row says "capacity ok" instead of
   "all nominal", which is all that row checks.
+- SMART polls no longer wake a sleeping hard disk. Every poll, five minutes
+  apart by default, spun up an ATA or SCSI disk that had spun down. smartctl
+  now runs with `-n standby`: a disk in standby is skipped, keeps its last
+  reading, and the SMART tab says "standby". Not yet tried on a spinning
+  disk.
 - Wide characters no longer break rows. Dense drew
   `日本語のファイル名テスト.log` as `日           log`, and in the Hot tab a CJK
   or emoji filename pushed the columns after it right, clipping AGE and

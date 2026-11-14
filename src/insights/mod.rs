@@ -386,8 +386,11 @@ fn all_clear(devices: &[DeviceTick], smart: &SmartCollector) -> Insight {
         };
     }
     let names: Vec<&str> = unread.iter().map(|d| d.name.as_str()).collect();
+    let asleep = |d: &&DeviceTick| smart.by_device.get(&d.name).is_some_and(|t| t.standby);
     let why = if unread.iter().any(|d| smart.needs_root(&d.name)) {
         "smartctl needs root (sudo diskwatch)"
+    } else if unread.iter().all(asleep) {
+        "asleep, and not woken to read it"
     } else if !smart.smartctl_available() && unread.iter().all(|d| d.smart_ok.is_none()) {
         "smartctl isn't installed"
     } else {
@@ -408,13 +411,10 @@ fn all_clear(devices: &[DeviceTick], smart: &SmartCollector) -> Insight {
 /// Windows) or smartctl data (Linux).
 fn smart_was_read(d: &DeviceTick, smart: &SmartCollector) -> bool {
     d.smart_ok.is_some()
-        || smart.by_device.get(&d.name).is_some_and(|t| {
-            !t.needs_root
-                && (t.temperature_c.is_some()
-                    || t.power_on_hours.is_some()
-                    || t.percentage_used.is_some()
-                    || !t.ata_attrs.is_empty())
-        })
+        || smart
+            .by_device
+            .get(&d.name)
+            .is_some_and(|t| !t.needs_root && crate::tabs::smart::has_reading(t))
 }
 
 fn io_dominant_device(io: &[IoTick]) -> Option<Insight> {

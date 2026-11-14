@@ -280,6 +280,10 @@ shifts between machines. Two consequences worth knowing:
 - **macOS reports no utilisation.** IOKit counts service time, not time-with-IO-in-flight,
   which on a deep-queue NVMe exceeds wall clock. Dense sorts devices by throughput there and
   says so in its own border.
+- **A sleeping disk isn't woken.** SMART polls pass `smartctl -n standby`, so an ATA or
+  SCSI disk in standby is skipped and keeps its last reading, marked "standby". smartctl
+  warns that working out the device type can still wake some disks; that hasn't been
+  tried on a spinning disk yet.
 - **The latency histogram samples.** Each 200 ms tick contributes its op count to the bucket
   holding that tick's mean service time. It shows a sustained slow stretch; it smears a lone
   50 ms outlier into whatever its tick averaged.
