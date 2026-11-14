@@ -500,8 +500,7 @@ fn draw_insights_summary(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let visible = (inner.height as usize).min(app.insights.len()).min(3);
-    for i in 0..visible {
-        let ins = &app.insights[i];
+    for (i, ins) in app.insights.iter().take(visible).enumerate() {
         let (badge_fg, badge_bg) = match ins.sev {
             Severity::Crit => (p::red(), p::err_bg()),
             Severity::Warn => (p::yellow(), p::warn_bg()),
