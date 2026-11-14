@@ -12,15 +12,14 @@
 //!    readable without measuring it against the axis.
 //! 3. **Derived axis ceilings** on a tight ladder, with the scale printed.
 //!
-//! The existing [`crate::ui::graph`] `dots` style is a different thing: one
-//! sample per *cell* column, coloured by horizontal position for the fade.
-//! This module's braille renderer is two samples per cell column, coloured
-//! by height, with a mirrored mode for the downward-growing write graph —
-//! none of which the shared module needs, and adding them there would
-//! complicate every caller.
+//! [`crate::ui::graph`] draws the other views' charts the same way: two
+//! samples per cell column, coloured by height. This module keeps its own
+//! renderer for what only the dense view needs — the mirrored write graph,
+//! value bands on one-row sparklines, and the design handoff's ramps — and
+//! shares the rest: the style setting, and under the `terminal` theme the
+//! gradient built from the terminal's reported palette.
 //!
-//! What this module *does* share with [`crate::ui::graph`] is the style
-//! choice itself: [`graph`] dispatches on the same global `GraphStyle`
+//! The style choice: [`graph`] dispatches on the same global `GraphStyle`
 //! everything else reads, drawing its own bars variant (see
 //! [`graph_bars`]) rather than braille when the setting is `bars`. Without
 //! that, the settings overlay's Graph style row would be a dead control
@@ -32,7 +31,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::ui::graph::{self, Gradient};
 use crate::ui::palette;
+use crate::ui::term_palette::{self, Palette};
 use crate::ui::theme;
 
 // ── braille ────────────────────────────────────────────────────────────────
@@ -105,42 +106,61 @@ impl Ramp {
         }
     }
 
-    /// The colour at `f` ∈ 0..1 along the ramp.
-    ///
-    /// Under the `terminal` theme this degrades to a themed ANSI slot rather
-    /// than interpolating RGB. A gradient has no 16-colour equivalent, and the
-    /// whole point of that theme is that diskwatch pins no colours of its own —
-    /// so magnitude ramps collapse to their base hue and the bounded-bad ramp
-    /// keeps its meaning through green / yellow / red thresholds.
-    pub fn at(self, f: f64) -> Color {
-        let f = f.clamp(0.0, 1.0);
+    /// The stops this ramp paints with under the active theme. Resolve once
+    /// per graph and sample the result: under the `terminal` theme this can
+    /// build a blended gradient, which is too much work to repeat per cell.
+    pub fn gradient(self) -> Gradient {
         if theme::active().name == "terminal" {
-            return match self {
-                Ramp::Read => palette::green(),
-                Ramp::Write => palette::cyan(),
-                Ramp::Load => {
-                    if f < 0.5 {
-                        palette::green()
-                    } else if f < 0.8 {
-                        palette::yellow()
-                    } else {
-                        palette::red()
+            return self.terminal(term_palette::get());
+        }
+        Gradient::new(
+            self.stops()
+                .iter()
+                .map(|&(r, g, b)| Color::Rgb(r, g, b))
+                .collect(),
+        )
+    }
+
+    /// Under the `terminal` theme, where diskwatch pins no colours of its
+    /// own. With the palette the terminal reported, the magnitude ramps blend
+    /// from the terminal's own green or cyan, and the bounded-bad ramp from
+    /// its green through yellow to red. Without one, the magnitude ramps step
+    /// to their bright token over the top quarter, and the bounded-bad ramp
+    /// keeps its meaning through green / yellow / red thresholds.
+    fn terminal(self, reported: Option<&Palette>) -> Gradient {
+        match self {
+            Ramp::Read => graph::terminal_gradient(palette::green(), reported),
+            Ramp::Write => graph::terminal_gradient(palette::cyan(), reported),
+            Ramp::Load => {
+                let (g, y, r) = (palette::green(), palette::yellow(), palette::red());
+                let rgb = reported.and_then(|p| Some((p.rgb(g)?, p.rgb(y)?, p.rgb(r)?)));
+                match rgb {
+                    Some((g, y, r)) => {
+                        let (g, y, r) = (
+                            Color::Rgb(g.0, g.1, g.2),
+                            Color::Rgb(y.0, y.1, y.2),
+                            Color::Rgb(r.0, r.1, r.2),
+                        );
+                        Gradient::new(vec![
+                            g,
+                            graph::lerp(g, y, 0.5),
+                            y,
+                            graph::lerp(y, r, 0.5),
+                            r,
+                        ])
                     }
+                    // Eleven stops put the steps at exactly 0.5 and 0.8:
+                    // tokens don't blend, so a sample takes the stop below it.
+                    None => Gradient::new([[g; 5].as_slice(), &[y; 3], &[r; 3]].concat()),
                 }
-            };
+            }
         }
-        let stops = self.stops();
-        let t = f * (stops.len() - 1) as f64;
-        let i = t.floor() as usize;
-        if i >= stops.len() - 1 {
-            let (r, g, b) = stops[stops.len() - 1];
-            return Color::Rgb(r, g, b);
-        }
-        let frac = t - i as f64;
-        let (ar, ag, ab) = stops[i];
-        let (br, bg, bb) = stops[i + 1];
-        let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * frac).round() as u8;
-        Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
+    }
+
+    /// The colour at `f` ∈ 0..1 along the ramp. For one-off samples; a loop
+    /// should take [`Ramp::gradient`] once and sample that.
+    pub fn at(self, f: f64) -> Color {
+        self.gradient().at(f as f32)
     }
 }
 
@@ -267,6 +287,7 @@ fn graph_bars(
     let (b_lo, b_hi) = band.unwrap_or((0.0, 1.0));
     let h = area.height as usize;
     let sub_h = h * 8;
+    let ramp = ramp.gradient();
 
     for cx in 0..area.width as usize {
         let lv = vals.get(cx * 2).copied().unwrap_or(0.0).max(0.0);
@@ -276,7 +297,7 @@ fn graph_bars(
             continue;
         }
         let f = ((v - b_lo) / (b_hi - b_lo).max(f64::EPSILON)).clamp(0.0, 1.0);
-        let color = ramp.at(f);
+        let color = ramp.at(f as f32);
         // Floored to at least one eighth, matching graph_braille's "any
         // non-zero sample is visible" rule.
         let filled = ((v.min(1.0) * sub_h as f64).round() as usize).max(1);
@@ -317,6 +338,7 @@ fn graph_braille(
     let (b_lo, b_hi) = band.unwrap_or((0.0, 1.0));
     let h = area.height as usize;
     let sub_h = h * 4;
+    let ramp = ramp.gradient();
 
     for cx in 0..area.width as usize {
         let lv = vals.get(cx * 2).copied().unwrap_or(0.0).max(0.0);
@@ -373,7 +395,7 @@ fn graph_braille(
             };
             let ch = char::from_u32(BR_BASE | bits as u32).unwrap_or(' ');
             if let Some(cell) = buf.cell_mut((area.x + cx as u16, area.y + cy as u16)) {
-                cell.set_char(ch).set_fg(ramp.at(f));
+                cell.set_char(ch).set_fg(ramp.at(f as f32));
             }
         }
     }
@@ -419,13 +441,14 @@ pub fn meter(buf: &mut Buffer, x: u16, y: u16, w: u16, frac: f64, ramp: Ramp) {
         0.0
     };
     let filled = (f * w as f64).round() as u16;
+    let ramp = ramp.gradient();
     for i in 0..w {
         let on = i < filled;
         // A one-cell meter has no position to sample along: i/(w-1) divides by
         // zero. Narrow layouts are exactly where a panic is least acceptable.
         let pos = if w > 1 { i as f64 / (w - 1) as f64 } else { f };
         let (ch, fg) = if on {
-            ('■', ramp.at(pos))
+            ('■', ramp.at(pos as f32))
         } else {
             ('·', palette::faint())
         };
@@ -978,21 +1001,50 @@ mod tests {
     }
 
     #[test]
-    fn terminal_theme_pins_no_rgb() {
-        // The `terminal` theme's whole promise is that diskwatch defines no
-        // colours of its own. A gradient has no 16-colour equivalent, so it
-        // has to degrade rather than leak RGB.
+    fn terminal_theme_pins_no_rgb_without_a_reported_palette() {
+        // The `terminal` theme's promise is that diskwatch defines no
+        // colours of its own. With nothing reported, a gradient has to step
+        // between palette tokens rather than leak RGB.
         let _g = theme::exclusive_theme("terminal");
         for f in [0.0, 0.4, 0.9, 1.0] {
             for r in [Ramp::Read, Ramp::Write, Ramp::Load] {
                 assert!(
-                    !matches!(r.at(f), Color::Rgb(..)),
+                    !matches!(r.terminal(None).at(f), Color::Rgb(..)),
                     "{r:?} at {f} pinned RGB under the terminal theme"
                 );
             }
         }
+        // The steps: bright over the top quarter, and the load thresholds
+        // at 0.5 and 0.8.
+        assert_eq!(Ramp::Read.terminal(None).at(0.5), Color::Green);
+        assert_eq!(Ramp::Read.terminal(None).at(0.9), Color::LightGreen);
+        assert_eq!(Ramp::Write.terminal(None).at(1.0), Color::LightCyan);
+        let load = Ramp::Load.terminal(None);
+        assert_eq!(load.at(0.49), Color::Green);
+        assert_eq!(load.at(0.5), Color::Yellow);
+        assert_eq!(load.at(0.79), Color::Yellow);
+        assert_eq!(load.at(0.8), Color::Red);
         // ...and the converse: an RGB theme still gets a real gradient.
         theme::set_by_name("dark");
         assert!(matches!(Ramp::Read.at(0.5), Color::Rgb(..)));
+    }
+
+    #[test]
+    fn terminal_theme_blends_the_reported_palette() {
+        // The terminal reported its colours, so the fade is built from them:
+        // RGB, but the user's RGB.
+        let _g = theme::exclusive_theme("terminal");
+        let mut p = Palette::default();
+        p.slots[1] = Some((0xff, 0x55, 0x55));
+        p.slots[2] = Some((0x50, 0xfa, 0x7b));
+        p.slots[3] = Some((0xf1, 0xfa, 0x8c));
+        p.slots[6] = Some((0x8b, 0xe9, 0xfd));
+        p.bg = Some((0x28, 0x2a, 0x36));
+        let read = Ramp::Read.terminal(Some(&p));
+        assert!(matches!(read.at(0.0), Color::Rgb(..)));
+        assert_ne!(read.at(0.0), read.at(1.0), "no gradient");
+        let load = Ramp::Load.terminal(Some(&p));
+        assert_eq!(load.at(0.0), Color::Rgb(0x50, 0xfa, 0x7b));
+        assert_eq!(load.at(1.0), Color::Rgb(0xff, 0x55, 0x55));
     }
 }

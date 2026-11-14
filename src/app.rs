@@ -449,6 +449,9 @@ pub fn run(opts: Options) -> Result<()> {
     let mut app = App::with_options(opts);
     let res = {
         let _session = crate::term::Session::enter()?;
+        // In raw mode, so the replies aren't echoed, and before the key
+        // reader starts, so it never sees them.
+        crate::ui::term_palette::init();
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         main_loop(&mut terminal, &mut app)
     };
@@ -1583,13 +1586,7 @@ fn settings_rows(app: &App) -> Vec<(&'static str, String)> {
         ("Graph style", crate::ui::graph::name().to_string()),
         (
             "Graph fade (btop gradient)",
-            if crate::ui::theme::name() == "terminal" {
-                // Say why rather than showing a toggle that does nothing:
-                // fade interpolates in RGB, which is exactly what this
-                // theme exists to avoid. Kept short — the value column is
-                // 17 cols and the row renderer truncates mid-word.
-                "n/a (terminal)".to_string()
-            } else if crate::ui::graph::fade_enabled() {
+            if crate::ui::graph::fade_enabled() {
                 "on".to_string()
             } else {
                 "off".to_string()
@@ -1978,8 +1975,7 @@ mod tests {
         let budget = settings_value_w() as usize;
 
         // Exercise the states that produce the longest values: the
-        // widest temperature unit, every theme (the `terminal` theme
-        // swaps the fade value for an explanation), and both fade states.
+        // widest temperature unit, every theme, and both fade states.
         for theme in crate::ui::theme::THEME_NAMES {
             crate::ui::theme::set_by_name(theme);
             for unit in [TempUnit::Celsius, TempUnit::Fahrenheit] {
