@@ -37,6 +37,14 @@ Changes from 0.7.1 on. Earlier releases are on the
   even when it's doing no IO, dimmed, as the docs describe. It was blank on
   every row, because processes doing no IO were left out of the lookup.
 - diskwatch no longer lists itself as the busiest process.
+- Insights says "All systems nominal" only when SMART was read for every
+  disk. Without root it wasn't, and the card said nominal next to a HEALTH
+  tile reading "unknown". It now says no problems were found but SMART
+  wasn't read, and why. Lite's capacity row says "capacity ok" instead of
+  "all nominal", which is all that row checks.
+- "Dominating disk IO" counts physical disks only, and needs at least two.
+  It named zram0, which is swap, and on a one-disk host it named the only
+  disk.
 - Hot Files copies the history of the files on screen only, not of every
   file it tracks, on each frame. With 4,096 busy files, the most it tracks,
   that copying took up to 7.5% of a core.

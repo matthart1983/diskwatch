@@ -906,7 +906,7 @@ pub fn is_stacked_name(name: &str) -> bool {
 
 /// Devices whose traffic belongs in a host-wide disk IO sum: neither
 /// stacked on another disk nor backed by memory.
-fn is_summed(name: &str) -> bool {
+pub fn is_summed(name: &str) -> bool {
     !is_stacked_name(name) && !crate::collect::devices::is_memory_backed(name)
 }
 
