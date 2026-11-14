@@ -52,6 +52,12 @@ Changes from 0.7.1 on. Earlier releases are on the
   or emoji filename pushed the columns after it right, clipping AGE and
   KIND. Padding and truncation now count terminal columns, and a wide
   character takes its two cells.
+- Without a terminal, diskwatch says it needs one and points at `--diag`,
+  instead of failing with "No such device or address (os error 6)". It exits
+  with status 2.
+- Directories Hot Files can't read inside a root, such as rootless podman
+  storage under `$HOME` or the root-only parts of `/var/log`, show as a note
+  beside the roots, not a red `ERROR:`. Nothing failed: they're skipped.
 - "Dominating disk IO" counts physical disks only, and needs at least two.
   It named zram0, which is swap, and on a one-disk host it named the only
   disk.

@@ -135,8 +135,9 @@ pub struct HotFileState {
     pub watch_budget: usize,
     #[cfg(target_os = "linux")]
     pub watch_budget_left: usize,
-    /// What the watch budget left out, when it left anything out. Not an
-    /// error: the roots are watched, just not all the way down.
+    /// What isn't watched and why, when something isn't: directories past
+    /// the watch budget, or ones we can't read. Not an error: the roots
+    /// are watched, just not all of them.
     pub limit_note: Option<String>,
     /// Linux: directories created under a watched one since install,
     /// waiting for [`HotFileWatcher::adopt_new_dirs`].
@@ -742,6 +743,10 @@ fn install(
     // With user-supplied paths a typo is the common case, not the
     // exotic one, so collect every failure and report them together.
     let mut errors: Vec<String> = Vec::new();
+    // What isn't watched but isn't a failure either: unreadable
+    // directories inside a root (rootless podman storage under $HOME, the
+    // root-only parts of /var/log), and the watch budget.
+    let mut notes: Vec<String> = Vec::new();
     let mut watched: Vec<PathBuf> = Vec::new();
     // Linux: choose every directory to watch before watching any, breadth
     // first across all roots, so the budget goes to the shallow parts of
@@ -779,13 +784,7 @@ fn install(
                     r.display()
                 ));
             } else if let Some(first) = unreadable.first() {
-                errors.push(format!(
-                    "{}: {} unreadable director{} not watched (e.g. {})",
-                    r.display(),
-                    unreadable.len(),
-                    if unreadable.len() == 1 { "y" } else { "ies" },
-                    first.display()
-                ));
+                notes.push(unreadable_note(r, unreadable.len(), first));
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -799,13 +798,7 @@ fn install(
                 let skipped = watch_readable_tree(&mut watcher, r, stop);
                 watched.push(r.clone());
                 if let Some(first) = skipped.first() {
-                    errors.push(format!(
-                        "{}: {} unreadable director{} not watched (e.g. {})",
-                        r.display(),
-                        skipped.len(),
-                        if skipped.len() == 1 { "y" } else { "ies" },
-                        first.display()
-                    ));
+                    notes.push(unreadable_note(r, skipped.len(), first));
                 }
             }
             Err(e) => errors.push(describe_watch_error(r, &e)),
@@ -868,12 +861,25 @@ fn install(
                 .map(|(r, _)| r.display().to_string())
                 .collect();
             if !cut.is_empty() {
-                s.limit_note = Some(limit_note(watched_dirs, &cut));
+                notes.insert(0, limit_note(watched_dirs, &cut));
             }
+        }
+        if !notes.is_empty() {
+            s.limit_note = Some(notes.join("; "));
         }
     }
 
     Some(watcher)
+}
+
+fn unreadable_note(root: &Path, count: usize, first: &Path) -> String {
+    format!(
+        "{}: {} unreadable director{} not watched (e.g. {})",
+        root.display(),
+        count,
+        if count == 1 { "y" } else { "ies" },
+        first.display()
+    )
 }
 
 /// How many directories Hot Files watches on Linux, and the system limit
@@ -1492,9 +1498,14 @@ mod tests {
             return; // running as root
         }
         assert_eq!(roots, vec![dir.clone()], "the root is still watched");
-        let err = err.expect("the skipped directory should be reported");
-        assert!(err.contains("locked"), "{err}");
-        assert!(!err.contains("fails the whole root"), "{err}");
+        assert!(
+            err.is_none(),
+            "skipping a directory isn't an error: {err:?}"
+        );
+        let note = w
+            .limit_note()
+            .expect("the skipped directory should be reported");
+        assert!(note.contains("locked"), "{note}");
     }
 
     /// The point of the background constructor: it must not wait for the
@@ -1914,11 +1925,12 @@ mod tests {
         );
         let control = control_state.lock().unwrap();
         assert_eq!(control.watch_roots, vec![dir.clone()]);
-        let control_err = control
-            .error
+        assert!(control.error.is_none(), "{:?}", control.error);
+        let control_note = control
+            .limit_note
             .clone()
             .expect("the skipped directory should be reported");
-        assert!(control_err.contains("locked"), "{control_err}");
+        assert!(control_note.contains("locked"), "{control_note}");
         drop(control);
         drop(control_watcher);
 

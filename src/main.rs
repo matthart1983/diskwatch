@@ -300,6 +300,19 @@ fn main() -> Result<()> {
         return run_diag(&cfg, &watch_roots);
     }
 
+    // Without a terminal the TUI failed with a bare "No such device or
+    // address (os error 6)", or drew escape codes into a file.
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            eprintln!(
+                "diskwatch: the dashboard needs a terminal, and stdout isn't one. \
+                 For plain text, use --diag."
+            );
+            std::process::exit(2);
+        }
+    }
+
     // Before any drawing: every palette read resolves through the active
     // theme, and every chart through the active graph style.
     ui::theme::set_by_name(&r.theme);
